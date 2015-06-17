@@ -28,6 +28,10 @@ add_library(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES})
 
+add_executable(pc_manipulator src/pc_manipulator.cpp)
+
+target_link_libraries(pc_manipulator ${catkin_LIBRARIES})
+
 install(FILES nodelet_plugins.xml
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

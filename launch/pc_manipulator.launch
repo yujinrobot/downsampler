@@ -1,0 +1,24 @@
+
+<launch>
+	<arg name="manager"               default="manager"/>
+	<arg name="input_cloud_topic"     default="gopher/sensor_3d_short_range/depth/points"/>
+	<arg name="ground_cloud_topic"    default="gopher/sensor_3d_short_range/ground_cloud"/>
+  <arg name="objects_cloud_topic"   default="gopher/sensor_3d_short_range/objects_cloud"/>
+	<arg name="min_range"             default="0.3"/>
+	<arg name="max_range"             default="2.0"/>
+	<arg name="leaf_size"             default="0.01"/>
+	<arg name="cloud_proc_perc"       default="0.05"/>
+	<arg name="rate"                  default="30"/>
+	
+  <node pkg="downsampler" type="pc_manipulator" name="pc_manipulator">
+    <remap from="input_cloud"   to="$(arg input_cloud_topic)"/>
+    <remap from="ground_cloud"  to="$(arg ground_cloud_topic)"/>
+    <remap from="objects_cloud" to="$(arg objects_cloud_topic)"/> 
+    
+    <param name="min_range"       type="double" value="$(arg min_range)"/> 
+    <param name="max_range"       type="double" value="$(arg max_range)"/> 
+    <param name="leaf_size"       type="double" value="$(arg leaf_size)"/>
+    <param name="cloud_proc_perc" type="double" value="$(arg cloud_proc_perc)"/>
+    <param name="rate"            type="double" value="$(arg rate)"/>
+  </node>
+</launch>
