@@ -17,10 +17,13 @@ public:
 protected:
   ros::Subscriber sub_cloud_;
   ros::Publisher pub_downsampled_cloud_;
+  ros::Publisher pub_filtered_cloud_;
 
   double min_range_;
   double max_range_;
   double leaf_size_;
+  double filter_radius_;
+  int min_points_threshold_;
 
   ros::Duration interval_;
   ros::Time next_call_time_;
