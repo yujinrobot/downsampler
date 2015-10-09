@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package>
   <name>downsampler</name>
-  <version>0.0.0</version>
+  <version>0.1.0</version>
   <description>The downsampler package</description>
 
   <maintainer email="reimann.alex.88@gmail.com">Alexander Reimann</maintainer>
