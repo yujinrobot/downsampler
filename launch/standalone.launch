@@ -1,0 +1,33 @@
+<launch>
+    <arg name="name"                                default="downsampler"/>
+    <arg name="manager"                             default="downsampler_manager"/>
+    <arg name="input_cloud_topic"                   default="/gopher/sensor_3d_short_range/depth/points"/>
+    <arg name="downsampled_points_topic"            default="/gopher/sensor_3d_short_range/depth/downsampled_points"/>
+
+    <arg name="min_range"                           default="0.0"/>
+    <arg name="max_range"                           default="0.0"/>
+    <arg name="leaf_size"                           default="0.02"/>
+    <arg name="filter_radius"                       default="0.0"/>
+    <arg name="min_points_threshold"                default="3"/>
+    <arg name="rate"                                default="20"/>
+
+    <arg name="remove_ramp"                         default="true"/>
+    <arg name="sensor_frame"                        default="sensor_3d_short_range_depth_optical_frame"/>
+
+  <node pkg="nodelet" type="nodelet" name="$(arg manager)" args="manager" launch-prefix="valgrind --tool=callgrind"/>
+
+  <node pkg="nodelet" type="nodelet" name="$(arg name)" args="load downsampler/downsampler $(arg manager)">
+      <remap from="input_cloud"                   to="$(arg input_cloud_topic)"/>
+      <remap from="downsampled_points"            to="$(arg downsampled_points_topic)"/>
+
+      <param name="min_range"                        type="double"         value="$(arg min_range)"/>
+      <param name="max_range"                        type="double"         value="$(arg max_range)"/>
+      <param name="leaf_size"                        type="double"         value="$(arg leaf_size)"/>
+      <param name="filter_radius"                    type="double"         value="$(arg filter_radius)"/>
+      <param name="min_points_threshold"             type="int"            value="$(arg min_points_threshold)"/>
+      <param name="rate"                             type="double"         value="$(arg rate)"/>
+
+      <param name="remove_ramp"                      type="bool"           value="$(arg remove_ramp)"/>
+      <param name="sensor_frame"                     type="string"         value="$(arg sensor_frame)"/>
+  </node>
+</launch>
