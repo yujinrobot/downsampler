@@ -1,6 +1,8 @@
 #include <downsampler/downsampler.h>
 #include <pluginlib/class_list_macros.h>
 
+#include <tf/transform_listener.h>
+
 #include <boost/shared_ptr.hpp>
 #include <pcl/point_types.h>
 #include <pcl_ros/point_cloud.h>
@@ -64,6 +66,8 @@ void Downsampler::onInit()
   pcl::console::setVerbosityLevel(pcl::console::L_ALWAYS);
 
   ROS_INFO_STREAM("Downsampling points using a leaf size of '" << leaf_size_ << "' m, running at " << rate << " Hz.");
+
+  lookedup_ = false;
 }
 
 void Downsampler::reconfigureCB(DownsamplerConfig &config, uint32_t level)
@@ -83,6 +87,30 @@ void Downsampler::reconfigureCB(DownsamplerConfig &config, uint32_t level)
 
 void Downsampler::downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 {
+  if (!lookedup_)
+  {
+    tf::TransformListener tf_listener;
+    tf::StampedTransform tf_footprint_to_sensor;
+    std::string sensor_frame = "sensor_3d_short_range_depth_optical_frame"; ///TODO get automatically
+
+    tf_listener.waitForTransform("base_footprint", sensor_frame, ros::Time::now(), ros::Duration(1.0));
+    tf_listener.lookupTransform("base_footprint", sensor_frame, ros::Time(0), tf_footprint_to_sensor);
+    tf_listener.lookupTransform("base_footprint", sensor_frame, ros::Time(0), tf_footprint_to_sensor);
+
+    tf::Vector3 z_axis_point(0.0, 0.0, 0.1); ///TODO maybe different point; take care of vector direction
+    robot_axis_in_camera_frame_ = tf_footprint_to_sensor(z_axis_point);
+    robot_axis_in_camera_frame_.normalize();
+    robot_center_in_camera_frame_ = tf_footprint_to_sensor(tf::Vector3(0, 0, 0));
+    robot_center_in_camera_frame_.normalize();
+
+    ROS_ERROR_STREAM(
+        "robot_axis_in_camera_frame_: " << robot_axis_in_camera_frame_.getX() << ", " << robot_axis_in_camera_frame_.getY() << ", " << robot_axis_in_camera_frame_.getZ());
+    ROS_ERROR_STREAM(
+        "robot_center_in_camera_frame_: " << robot_center_in_camera_frame_.getX() << ", " << robot_center_in_camera_frame_.getY() << ", " << robot_center_in_camera_frame_.getZ());
+
+    lookedup_ = true;
+  }
+
   if (ros::Time::now() <= next_call_time_)
     return;
   next_call_time_ = next_call_time_ + interval_;
@@ -159,7 +187,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
   pcl::PointCloud<pcl::PointXYZ>::Ptr result(new pcl::PointCloud<pcl::PointXYZ>());
 
   boost::shared_ptr<pcl::ModelCoefficients> ground_coefficients(new pcl::ModelCoefficients);
-  boost::shared_ptr<pcl::ModelCoefficients> ramp_coefficients(new pcl::ModelCoefficients);
+  boost::shared_ptr<pcl::ModelCoefficients> plane_coefficients(new pcl::ModelCoefficients);
   pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
 
   pcl::SACSegmentation<pcl::PointXYZ> segmentation;
@@ -207,23 +235,24 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
   int i = 0;
   while (i <= 3)
   {
-    pcl::PointIndices::Ptr ramp_inliers = extractRamp(ground_free, ground_coefficients->values, ramp_coefficients);
+    pcl::PointIndices::Ptr plane_inliers = extractRamp(ground_free, ground_coefficients->values, plane_coefficients);
     ++i;
 
-    if (ramp_coefficients->values.size() == 0)
+    if (plane_coefficients->values.size() == 0)
     {
 //      ROS_INFO("[Downsampler]: Could not extract ramp, no ramp in field of view?");
       return ground_free;
     }
 
-//    if (std::abs(ramp_coefficients->values[3]) > 1.25) ////TODO calc value automatically
-    {
+    double plane_angle = robotPlaneAngle(ground_coefficients, plane_coefficients);
 
+    if (checkPlane(ground_free, plane_inliers, plane_coefficients, plane_angle) != NotATraversablePlane)
+    {
       if (pub_ramp_.getNumSubscribers() > 0)
       {
         pcl::ExtractIndices<pcl::PointXYZ> extract_ramp;
         extract_ramp.setInputCloud(ground_free);
-        extract_ramp.setIndices(ramp_inliers);
+        extract_ramp.setIndices(plane_inliers);
         extract_ramp.filter(*ramp);
 
         sensor_msgs::PointCloud2Ptr plane_msg(new sensor_msgs::PointCloud2);
@@ -234,7 +263,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
       pcl::ExtractIndices<pcl::PointXYZ> extract_result;
       extract_result.setInputCloud(ground_free);
       extract_result.setNegative(true);
-      extract_result.setIndices(ramp_inliers);
+      extract_result.setIndices(plane_inliers);
       extract_result.filter(*result);
 
       if (i > 1)
@@ -252,7 +281,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
     pcl::ExtractIndices<pcl::PointXYZ> extract_plane;
     extract_plane.setInputCloud(ground_free);
-    extract_plane.setIndices(ramp_inliers);
+    extract_plane.setIndices(plane_inliers);
     extract_plane.filter(*plane);
 
     *removed_planes = *removed_planes + *plane;
@@ -261,7 +290,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
     pcl::ExtractIndices<pcl::PointXYZ> extract_plane_invert;
     extract_plane.setInputCloud(ground_free);
-    extract_plane.setIndices(ramp_inliers);
+    extract_plane.setIndices(plane_inliers);
     extract_plane.setNegative(true);
     extract_plane.filter(*new_ground_free);
 
@@ -291,6 +320,110 @@ pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::
   segmentation.segment(*inliers, *coeff_out);
 
   return inliers;
+}
+
+double Downsampler::robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> ground_coeff,
+                                    boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
+{
+  tf::Vector3 ground_vector(ground_coeff->values[0], ground_coeff->values[1], ground_coeff->values[2]);
+  tf::Vector3 plane_vector(plane_coeff->values[0], plane_coeff->values[1], plane_coeff->values[2]);
+
+  double dot_result = ground_vector.dot(plane_vector);
+
+  if (dot_result == 0)
+  {
+    ROS_ERROR_STREAM("[Downsampler]: Detected plane angle is orthogonal; dot result: " << dot_result);
+    ROS_ERROR_STREAM(
+        "[Downsampler]: ground_vector: " << ground_vector.getX() << "," << ground_vector.getY() << ", " << ground_vector.getZ());
+    ROS_ERROR_STREAM(
+        "[Downsampler]: plane_vector: " << plane_vector.getX() << "," << plane_vector.getY() << ", " << plane_vector.getZ());
+    return DEG2RAD(90);
+  }
+  ROS_INFO_STREAM(
+      "[Downsampler]: ground_vector: " << ground_vector.getX() << "," << ground_vector.getY() << ", " << ground_vector.getZ());
+  ROS_INFO_STREAM(
+      "[Downsampler]: plane_vector: " << plane_vector.getX() << "," << plane_vector.getY() << ", " << plane_vector.getZ());
+
+  double angle = std::acos(dot_result / (ground_vector.length() * plane_vector.length()));
+
+  return angle;
+}
+
+Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                               pcl::PointIndices::Ptr plane_indicies,
+                                               boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
+                                               double plane_angle)
+{
+  double plane_to_sensor_distance = plane_coeff->values[3];
+
+  ROS_INFO_STREAM("plane_to_sensor_distance: " << plane_to_sensor_distance);
+  ROS_INFO_STREAM("plane_angle: " << plane_angle);
+
+  //check if the plane is possibly the ground plane
+  //inclination is less than threshold (1? degree)
+  if (std::abs(plane_angle) <= DEG2RAD(1.0))
+  {
+    ROS_INFO("Ground plane");
+    //it's a seemingly the ground plane but maybe it is just random objects which look like that
+    //check if some random normals fit
+    if (normalsOfPointsSupportThePlane(cloud, plane_indicies, plane_coeff))
+    {
+      return Ground;
+    }
+    else
+    {
+      return NotATraversablePlane;
+    }
+  }
+
+  //else it could be a traversable slope, so check that
+  //A slope has to end before the robot centre
+
+  if (plane_angle >= 0) //incline
+  {
+    ROS_INFO("Incline");
+    if (plane_to_sensor_distance < robot_center_in_camera_frame_.length())
+    {
+      ROS_INFO("Plane ends behind robot");
+      //plane does not end under the robot
+      return NotATraversablePlane;
+    }
+    ROS_INFO("Found slope");
+  }
+  else //decline
+  {
+    ROS_INFO("Decline");
+    ///TODO find a good way to evaluate if the plane is in the wrong position
+//    if (plane_to_sensor_distance > robot_center_in_camera_frame_.length())
+//    {
+//      //plane does not end under the robot
+//      return NotATraversablePlane;
+//    }
+  }
+
+  //it's a seemingly traversable slope but maybe it is just random objects which look like that
+  //check if some random normals fit
+  if (normalsOfPointsSupportThePlane(cloud, plane_indicies, plane_coeff))
+  {
+    return Slope;
+  }
+
+  return NotATraversablePlane;
+}
+
+bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                                 pcl::PointIndices::Ptr plane_indicies,
+                                                 boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
+{
+//make an array of n = ? random indices
+//and check if k % of the normals fit to plane
+
+  return true;
+}
+
+bool Downsampler::approximateNormal(pcl::Normal normal_out)
+{
+  return true;
 }
 
 } //end namespace

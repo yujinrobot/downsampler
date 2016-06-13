@@ -8,6 +8,8 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <pcl/point_types.h>
 #include <pcl_ros/point_cloud.h>
+#include <ecl/geometry.hpp>
+#include <tf/LinearMath/Vector3.h>
 
 namespace downsampler
 {
@@ -19,10 +21,22 @@ public:
   virtual void downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cloud_msg);
 
 protected:
+  enum PlaneType
+  {
+    Ground, Slope, NotATraversablePlane
+  };
+
   virtual void reconfigureCB(DownsamplerConfig &config, uint32_t level);
   virtual pcl::PointCloud<pcl::PointXYZ>::Ptr extractPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
   virtual pcl::PointIndices::Ptr extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud, std::vector<float>& axis,
                                              boost::shared_ptr<pcl::ModelCoefficients> coeff_out);
+  virtual double robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> ground_coeff, boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
+  virtual PlaneType checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, pcl::PointIndices::Ptr plane_indicies,
+                               boost::shared_ptr<pcl::ModelCoefficients> plane_coeff, double plane_angle);
+  virtual bool normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                        pcl::PointIndices::Ptr plane_indicies,
+                                        boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
+  virtual bool approximateNormal(pcl::Normal normal_out);
 
   ros::Subscriber sub_cloud_;
   ros::Publisher pub_downsampled_;
@@ -41,8 +55,13 @@ protected:
 
   int plane_fitting_type_;
   int plane_max_search_count_;
+
   double plane_max_deviation_;
   double plane_max_angle_;
+  bool lookedup_;
+
+  tf::Vector3 robot_axis_in_camera_frame_;
+  tf::Vector3 robot_center_in_camera_frame_;
 
   ros::Duration interval_;
   ros::Time next_call_time_;

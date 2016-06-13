@@ -10,6 +10,7 @@ find_package(catkin REQUIRED COMPONENTS
   pcl_ros
   roscpp
   sensor_msgs
+  ecl_geometry
 )
 
 generate_dynamic_reconfigure_options(
@@ -23,6 +24,7 @@ catkin_package(CATKIN_DEPENDS
   pcl_ros
   roscpp
   sensor_msgs
+  ecl_geometry
 )
 
 include_directories( include
