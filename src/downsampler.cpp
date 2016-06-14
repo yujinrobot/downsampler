@@ -53,10 +53,13 @@ void Downsampler::onInit()
   private_nh.param("min_points_threshold", min_points_threshold_, 3);
 
   private_nh.param("plane_fitting_type", plane_fitting_type_, pcl::SAC_LMEDS);
-  private_nh.param("plane_max_search_count", plane_max_search_count_, 200);
+  private_nh.param("plane_max_search_count", plane_max_search_count_, 150);
   private_nh.param("plane_max_deviation", plane_max_deviation_, 0.02);
   private_nh.param("plane_max_angle_degree", plane_max_angle_, 5.0);
   plane_max_angle_ = DEG2RAD(plane_max_angle_);
+
+  private_nh.param("normal_neighbours", normal_neighbours_, 8);
+  private_nh.param("max_angle_error_", max_angle_error_, 25.0);
 
   double rate;
   private_nh.param("rate", rate, 30.0);
@@ -87,6 +90,9 @@ void Downsampler::reconfigureCB(DownsamplerConfig &config, uint32_t level)
   plane_max_deviation_ = config.plane_max_deviation;
   plane_max_angle_ = config.plane_max_angle_degree;
   plane_max_angle_ = DEG2RAD(plane_max_angle_);
+
+  normal_neighbours_ = config.normal_neighbours;
+  max_angle_error_ = config.max_angle_error;
 }
 
 void Downsampler::downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
@@ -238,9 +244,16 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
   double ground_d = ground_coefficients->values[3];
 
-  result = ground_free;
+  if (ground_d < 0)
+  {
+    for (int i = 0; i < ground_coefficients->values.size(); ++i)
+    {
+      ground_coefficients->values[i] *= -1;
+    }
+  }
 
   int i = 0;
+  bool found = false;
   while (i <= 3)
   {
     pcl::PointIndices::Ptr plane_inliers = extractRamp(ground_free, ground_coefficients->values, plane_coefficients);
@@ -248,26 +261,26 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
     if (plane_coefficients->values.size() == 0)
     {
-//      ROS_INFO("[Downsampler]: Could not extract ramp, no ramp in field of view?");
+      ROS_INFO("[Downsampler]: Could not extract ramp, no ramp in field of view?");
       return ground_free;
     }
 
     double plane_angle = robotPlaneAngle(ground_coefficients, plane_coefficients);
 
-    if (checkPlane(ground_free, plane_inliers, plane_coefficients, plane_angle) == Ramp)
+    pcl::ExtractIndices<pcl::PointXYZ> extract_ramp;
+    extract_ramp.setInputCloud(ground_free);
+    extract_ramp.setIndices(plane_inliers);
+    extract_ramp.filter(*ramp);
+
+    if (pub_ramp_.getNumSubscribers() > 0)
     {
-      if (pub_ramp_.getNumSubscribers() > 0)
-      {
-        pcl::ExtractIndices<pcl::PointXYZ> extract_ramp;
-        extract_ramp.setInputCloud(ground_free);
-        extract_ramp.setIndices(plane_inliers);
-        extract_ramp.filter(*ramp);
+//      sensor_msgs::PointCloud2Ptr plane_msg(new sensor_msgs::PointCloud2);
+//      pcl::toROSMsg(*ramp, *plane_msg);
+//      pub_ramp_.publish(plane_msg);
+    }
 
-        sensor_msgs::PointCloud2Ptr plane_msg(new sensor_msgs::PointCloud2);
-        pcl::toROSMsg(*ramp, *plane_msg);
-        pub_ramp_.publish(plane_msg);
-      }
-
+    if (checkPlane(ramp, plane_coefficients, plane_angle) == Ramp)
+    {
       pub_ramp_pose_.publish(coeffToOdom(plane_coefficients, "ramp"));
 
       result->clear();
@@ -284,6 +297,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
         *result = *result + *removed_planes;
       }
 
+      found = true;
       break;
     }
 
@@ -307,9 +321,26 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
     extract_plane.filter(*new_ground_free);
 
     ground_free = new_ground_free;
+
+//    ros::Duration(5.0).sleep();
   }
 
-  return result;
+  if (!found)
+    ramp->clear();
+
+  if (pub_ramp_.getNumSubscribers() > 0)
+  {
+    sensor_msgs::PointCloud2Ptr plane_msg(new sensor_msgs::PointCloud2);
+    pcl::toROSMsg(*ramp, *plane_msg);
+    pub_ramp_.publish(plane_msg);
+  }
+
+  if(found)
+    return result;
+
+  *ground_free = *ground_free + *removed_planes;
+
+  return ground_free;
 }
 
 pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud,
@@ -359,7 +390,6 @@ double Downsampler::robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> gr
 }
 
 Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                               pcl::PointIndices::Ptr plane_indicies,
                                                boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
                                                double plane_angle)
 {
@@ -377,7 +407,7 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
     ROS_INFO("Ground plane");
     //it's a seemingly the ground plane but maybe it is just random objects which look like that
     //check if some random normals fit
-    if (normalsOfPointsSupportThePlane(cloud, plane_indicies, plane_coeff))
+    if (normalsOfPointsSupportThePlane(cloud, plane_coeff))
     {
       return Ground;
     }
@@ -414,7 +444,7 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
 
   //it's a seemingly traversable slope but maybe it is just random objects which look like that
   //check if some random normals fit
-  if (normalsOfPointsSupportThePlane(cloud, plane_indicies, plane_coeff))
+  if (normalsOfPointsSupportThePlane(cloud, plane_coeff))
   {
     return Ramp;
   }
@@ -471,11 +501,59 @@ nav_msgs::OdometryPtr Downsampler::coeffToOdom(boost::shared_ptr<pcl::ModelCoeff
 }
 
 bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                                 pcl::PointIndices::Ptr plane_indicies,
                                                  boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
 {
+  Eigen::Vector3f plane_normal(plane_coeff->values[0], plane_coeff->values[1], plane_coeff->values[2]);
+
+  pcl::PointCloud<pcl::Normal>::Ptr cloud_normals(new pcl::PointCloud<pcl::Normal>);
+  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
+  pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
+
+  ne.setSearchMethod(tree);
+  ne.setInputCloud(cloud);
+  ne.setKSearch(normal_neighbours_);
+  ne.compute(*cloud_normals);
+
+  ///TODO
 //make an array of n = ? random indices
 //and check if k % of the normals fit to plane
+
+  pcl::PointCloud<pcl::Normal>::iterator it;
+
+  double error_sum = 0.0;
+  double error = 0.0;
+
+  for (it = cloud_normals->begin(); it != cloud_normals->end(); ++it)
+  {
+    Eigen::Vector3f normal = (*it).getNormalVector3fMap();
+    error = std::acos(plane_normal.dot(normal));
+
+    if (std::isnan(error))
+    {
+      error = 0;
+    }
+
+    if (std::abs(error) >= DEG2RAD(90))
+    {
+      error = error - std::copysign(DEG2RAD(180), error);
+    }
+
+    ROS_WARN_STREAM("Error: " << error);
+    error_sum += std::abs(error);
+  }
+
+  error_sum = error_sum / cloud_normals->size();
+
+  double max_error = DEG2RAD(max_angle_error_);
+
+  if (error_sum >= max_error)
+  {
+    ROS_ERROR_STREAM(
+        "angle_error > " << RAD2DEG(max_error) << " deg: " << RAD2DEG(error_sum) << "; size: " << cloud_normals->size());
+    return false;
+  }
+
+  ROS_WARN_STREAM("angle_error: " << RAD2DEG(error_sum) << "; size: " << cloud_normals->size());
 
   return true;
 }

@@ -32,13 +32,13 @@ protected:
   virtual pcl::PointCloud<pcl::PointXYZ>::Ptr extractPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
   virtual pcl::PointIndices::Ptr extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud, std::vector<float>& axis,
                                              boost::shared_ptr<pcl::ModelCoefficients> coeff_out);
-  virtual double robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> ground_coeff, boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
-  virtual PlaneType checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, pcl::PointIndices::Ptr plane_indicies,
+  virtual double robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> ground_coeff,
+                                 boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
+  virtual PlaneType checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                                boost::shared_ptr<pcl::ModelCoefficients> plane_coeff, double plane_angle);
   virtual nav_msgs::OdometryPtr coeffToOdom(boost::shared_ptr<pcl::ModelCoefficients> coeff, std::string name);
   virtual bool normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                        pcl::PointIndices::Ptr plane_indicies,
-                                        boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
+                                              boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
   virtual bool approximateNormal(pcl::Normal normal_out);
 
   ros::Subscriber sub_cloud_;
@@ -61,6 +61,9 @@ protected:
 
   int plane_fitting_type_;
   int plane_max_search_count_;
+
+  int normal_neighbours_;
+  double max_angle_error_;
 
   double plane_max_deviation_;
   double plane_max_angle_;
