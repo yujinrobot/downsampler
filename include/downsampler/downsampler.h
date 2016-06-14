@@ -10,6 +10,8 @@
 #include <pcl_ros/point_cloud.h>
 #include <ecl/geometry.hpp>
 #include <tf/LinearMath/Vector3.h>
+#include <tf/transform_broadcaster.h>
+#include <nav_msgs/Odometry.h>
 
 namespace downsampler
 {
@@ -23,7 +25,7 @@ public:
 protected:
   enum PlaneType
   {
-    Ground, Slope, NotATraversablePlane
+    Ground, Ramp, NotATraversablePlane
   };
 
   virtual void reconfigureCB(DownsamplerConfig &config, uint32_t level);
@@ -33,6 +35,7 @@ protected:
   virtual double robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> ground_coeff, boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
   virtual PlaneType checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, pcl::PointIndices::Ptr plane_indicies,
                                boost::shared_ptr<pcl::ModelCoefficients> plane_coeff, double plane_angle);
+  virtual nav_msgs::OdometryPtr coeffToOdom(boost::shared_ptr<pcl::ModelCoefficients> coeff, std::string name);
   virtual bool normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                                         pcl::PointIndices::Ptr plane_indicies,
                                         boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
@@ -44,6 +47,9 @@ protected:
   ros::Publisher pub_ground_;
   ros::Publisher pub_ramp_;
   ros::Publisher pub_result_;
+  ros::Publisher pub_ground_pose_;
+  ros::Publisher pub_pose_;
+  ros::Publisher pub_ramp_pose_;
 
   std::shared_ptr<dynamic_reconfigure::Server<DownsamplerConfig> > reconfigure_server_;
 
@@ -66,6 +72,7 @@ protected:
   ros::Duration interval_;
   ros::Time next_call_time_;
 
+  tf::TransformBroadcaster transform_broadcaster_;
 };
 
 } //end namespace

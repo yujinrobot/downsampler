@@ -34,6 +34,10 @@ void Downsampler::onInit()
   pub_ground_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("ground_points", 1);
   pub_result_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("result_points", 1);
 
+  pub_pose_ = nh.advertise<nav_msgs::Odometry>("plane_pose", 50);
+  pub_ground_pose_ = nh.advertise<nav_msgs::Odometry>("ground_pose", 50);
+  pub_ramp_pose_ = nh.advertise<nav_msgs::Odometry>("ramp_pose", 50);
+
   reconfigure_server_ = std::shared_ptr<dynamic_reconfigure::Server<DownsamplerConfig> >(
       new dynamic_reconfigure::Server<DownsamplerConfig>(nh));
   dynamic_reconfigure::Server<DownsamplerConfig>::CallbackType reconfigure_cb = boost::bind(&Downsampler::reconfigureCB,
@@ -180,6 +184,8 @@ void Downsampler::downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cl
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
 {
+  ROS_WARN("------------------------------------");
+
   pcl::PointCloud<pcl::PointXYZ>::Ptr ground_free(new pcl::PointCloud<pcl::PointXYZ>());
   pcl::PointCloud<pcl::PointXYZ>::Ptr ground(new pcl::PointCloud<pcl::PointXYZ>());
   pcl::PointCloud<pcl::PointXYZ>::Ptr ramp(new pcl::PointCloud<pcl::PointXYZ>());
@@ -232,6 +238,8 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
   double ground_d = ground_coefficients->values[3];
 
+  result = ground_free;
+
   int i = 0;
   while (i <= 3)
   {
@@ -246,7 +254,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
     double plane_angle = robotPlaneAngle(ground_coefficients, plane_coefficients);
 
-    if (checkPlane(ground_free, plane_inliers, plane_coefficients, plane_angle) != NotATraversablePlane)
+    if (checkPlane(ground_free, plane_inliers, plane_coefficients, plane_angle) == Ramp)
     {
       if (pub_ramp_.getNumSubscribers() > 0)
       {
@@ -259,6 +267,10 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
         pcl::toROSMsg(*ramp, *plane_msg);
         pub_ramp_.publish(plane_msg);
       }
+
+      pub_ramp_pose_.publish(coeffToOdom(plane_coefficients, "ramp"));
+
+      result->clear();
 
       pcl::ExtractIndices<pcl::PointXYZ> extract_result;
       extract_result.setInputCloud(ground_free);
@@ -328,23 +340,20 @@ double Downsampler::robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> gr
   tf::Vector3 ground_vector(ground_coeff->values[0], ground_coeff->values[1], ground_coeff->values[2]);
   tf::Vector3 plane_vector(plane_coeff->values[0], plane_coeff->values[1], plane_coeff->values[2]);
 
-  double dot_result = ground_vector.dot(plane_vector);
+  ROS_INFO_STREAM(
+      "[Downsampler]: ground_vector: " << ground_vector.getX() << ", " << ground_vector.getY() << ", " << ground_vector.getZ() << "; " << ground_coeff->values[3]);
+  ROS_INFO_STREAM(
+      "[Downsampler]: plane_vector: " << plane_vector.getX() << ", " << plane_vector.getY() << ", " << plane_vector.getZ() << "; " << plane_coeff->values[3]);
 
-  if (dot_result == 0)
+  double angle = plane_vector.angle(ground_vector);
+
+  if (std::abs(angle) >= DEG2RAD(90))
   {
-    ROS_ERROR_STREAM("[Downsampler]: Detected plane angle is orthogonal; dot result: " << dot_result);
-    ROS_ERROR_STREAM(
-        "[Downsampler]: ground_vector: " << ground_vector.getX() << "," << ground_vector.getY() << ", " << ground_vector.getZ());
-    ROS_ERROR_STREAM(
-        "[Downsampler]: plane_vector: " << plane_vector.getX() << "," << plane_vector.getY() << ", " << plane_vector.getZ());
-    return DEG2RAD(90);
+    ROS_WARN_STREAM("Flipping " << angle << " to " << angle - std::copysign(DEG2RAD(180), angle));
+    angle = angle - std::copysign(DEG2RAD(180), angle);
   }
-  ROS_INFO_STREAM(
-      "[Downsampler]: ground_vector: " << ground_vector.getX() << "," << ground_vector.getY() << ", " << ground_vector.getZ());
-  ROS_INFO_STREAM(
-      "[Downsampler]: plane_vector: " << plane_vector.getX() << "," << plane_vector.getY() << ", " << plane_vector.getZ());
 
-  double angle = std::acos(dot_result / (ground_vector.length() * plane_vector.length()));
+  pub_ground_pose_.publish(coeffToOdom(ground_coeff, "ground"));
 
   return angle;
 }
@@ -354,6 +363,8 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
                                                boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
                                                double plane_angle)
 {
+  pub_pose_.publish(coeffToOdom(plane_coeff, "plane"));
+
   double plane_to_sensor_distance = plane_coeff->values[3];
 
   ROS_INFO_STREAM("plane_to_sensor_distance: " << plane_to_sensor_distance);
@@ -405,10 +416,58 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
   //check if some random normals fit
   if (normalsOfPointsSupportThePlane(cloud, plane_indicies, plane_coeff))
   {
-    return Slope;
+    return Ramp;
   }
 
   return NotATraversablePlane;
+}
+
+nav_msgs::OdometryPtr Downsampler::coeffToOdom(boost::shared_ptr<pcl::ModelCoefficients> coeff, std::string name)
+{
+  double a = coeff->values[0];
+  double b = coeff->values[1];
+  double c = coeff->values[2];
+  double d = coeff->values[3];
+
+  tf::Vector3 normal(a, b, c);
+  normal.normalize();
+
+  double length_squared = a * a + b * b + c * c;
+
+  //get closest point to the origin of the plane
+  double scale = -d / length_squared;
+  double x = a * scale;
+  double y = b * scale;
+  double z = c * scale;
+
+  tf::Vector3 axis(1, 0, 0);
+  tf::Vector3 rotation_axis = axis.cross(normal);
+  double rotation_angle = std::acos(axis.dot(normal) / (normal.length() * axis.length()));
+
+  tf::Quaternion q;
+  q.setRotation(rotation_axis, rotation_angle);
+
+  tf::Transform transform;
+  transform.setOrigin(tf::Vector3(x, y, z));
+  transform.setRotation(q);
+  transform_broadcaster_.sendTransform(
+      tf::StampedTransform(transform, ros::Time::now(), "sensor_3d_short_range_depth_optical_frame", name)); ///TODO
+
+  nav_msgs::OdometryPtr odom_msg = nav_msgs::OdometryPtr(new nav_msgs::Odometry());
+  odom_msg->header.stamp = ros::Time::now();
+  odom_msg->header.frame_id = "sensor_3d_short_range_depth_optical_frame"; ///TODO
+
+  geometry_msgs::Quaternion odom_quat;
+  tf::quaternionTFToMsg(q, odom_quat);
+
+  odom_msg->pose.pose.position.x = x;
+  odom_msg->pose.pose.position.y = y;
+  odom_msg->pose.pose.position.z = z;
+  odom_msg->pose.pose.orientation = odom_quat;
+
+  odom_msg->child_frame_id = name;
+
+  return odom_msg;
 }
 
 bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
