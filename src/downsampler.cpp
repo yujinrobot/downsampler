@@ -19,6 +19,9 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl/search/kdtree.h>
 #include <pcl/console/print.h>
+#include <pcl/sample_consensus/sac_model_plane.h>
+
+#include <algorithm>
 
 namespace downsampler
 {
@@ -32,6 +35,7 @@ void Downsampler::onInit()
   pub_filtered_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("filtered_points", 1);
   pub_ramp_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("ramp_points", 1);
   pub_ground_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("ground_points", 1);
+  pub_padded_ground_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("padded_ground_points", 1);
   pub_result_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("result_points", 1);
 
   pub_pose_ = nh.advertise<nav_msgs::Odometry>("plane_pose", 50);
@@ -194,41 +198,55 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr ground_free(new pcl::PointCloud<pcl::PointXYZ>());
   pcl::PointCloud<pcl::PointXYZ>::Ptr ground(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::PointCloud<pcl::PointXYZ>::Ptr ramp(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::PointCloud<pcl::PointXYZ>::Ptr removed_planes(new pcl::PointCloud<pcl::PointXYZ>());
   pcl::PointCloud<pcl::PointXYZ>::Ptr result(new pcl::PointCloud<pcl::PointXYZ>());
 
   boost::shared_ptr<pcl::ModelCoefficients> ground_coefficients(new pcl::ModelCoefficients);
-  boost::shared_ptr<pcl::ModelCoefficients> plane_coefficients(new pcl::ModelCoefficients);
-  pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
+
+  pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices());
 
   pcl::SACSegmentation<pcl::PointXYZ> segmentation;
 
   segmentation.setOptimizeCoefficients(true);
   segmentation.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
   segmentation.setMethodType(plane_fitting_type_);
-  segmentation.setDistanceThreshold(plane_max_deviation_); //we gotta catch'em all, so set that low
+  segmentation.setDistanceThreshold(plane_max_deviation_ + 0.02); //we gotta catch'em all, so set that low
   segmentation.setMaxIterations(plane_max_search_count_); //wanna be the very best, so set that high
 
   segmentation.setAxis(Eigen::Vector3f(0, -0.095, -0.226)); ///TODO set automatically
   segmentation.setEpsAngle(plane_max_angle_);
 
   segmentation.setInputCloud(cloud);
-  segmentation.segment(*inliers, *ground_coefficients);
+  segmentation.segment(*ground_inliers, *ground_coefficients);
 
   ///TODO make sure the ground is near the ground
 
+  if (pub_padded_ground_.getNumSubscribers() > 0)
+  {
+    pcl::ExtractIndices<pcl::PointXYZ> extract_ground;
+    extract_ground.setInputCloud(cloud);
+    extract_ground.setIndices(ground_inliers);
+    extract_ground.filter(*ground);
+
+    sensor_msgs::PointCloud2Ptr ground_msg(new sensor_msgs::PointCloud2);
+    pcl::toROSMsg(*ground, *ground_msg);
+    pub_padded_ground_.publish(ground_msg);
+  }
+
+  std::vector<pcl::PointXYZ> ground_buffer_points = filterIndices(cloud, ground_coefficients, ground_inliers);
+
   pcl::ExtractIndices<pcl::PointXYZ> remove_ground;
   remove_ground.setInputCloud(cloud);
-  remove_ground.setIndices(inliers);
+  remove_ground.setIndices(ground_inliers);
   remove_ground.setNegative(true);
   remove_ground.filter(*ground_free);
 
   if (pub_ground_.getNumSubscribers() > 0)
   {
+    ground->clear();
+
     pcl::ExtractIndices<pcl::PointXYZ> extract_ground;
     extract_ground.setInputCloud(cloud);
-    extract_ground.setIndices(inliers);
+    extract_ground.setIndices(ground_inliers);
     extract_ground.filter(*ground);
 
     sensor_msgs::PointCloud2Ptr ground_msg(new sensor_msgs::PointCloud2);
@@ -236,7 +254,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
     pub_ground_.publish(ground_msg);
   }
 
-  if (inliers->indices.size() == 0 || ground_coefficients->values.size() == 0)
+  if (ground_inliers->indices.size() == 0 || ground_coefficients->values.size() == 0)
   {
     ROS_INFO_THROTTLE(10, "[Downsampler]: Could not extract ground plane, no ground in field of view?");
     return cloud;
@@ -252,50 +270,77 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
     }
   }
 
+  Eigen::Vector3f rotated_up = getRotatedNormal(ground_coefficients, 3.0);
+  Eigen::Vector3f rotated_down = getRotatedNormal(ground_coefficients, -3.0);
+
+  result = doStuff(ground_free, rotated_up, ground_buffer_points);
+
+  if(result->empty())
+  {
+    ROS_INFO("----------------");
+    result = doStuff(ground_free, rotated_down, ground_buffer_points);
+  }
+
+  if(result->empty())
+  {
+    return ground_free;
+  }
+
+  return result;
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::doStuff(pcl::PointCloud<pcl::PointXYZ>::Ptr ground_free,
+                                                         Eigen::Vector3f& axis,
+                                                         std::vector<pcl::PointXYZ>& ground_buffer_points)
+{
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>(*ground_free));
+  pcl::PointCloud<pcl::PointXYZ>::Ptr ramp(new pcl::PointCloud<pcl::PointXYZ>());
+  pcl::PointCloud<pcl::PointXYZ>::Ptr removed_planes(new pcl::PointCloud<pcl::PointXYZ>());
+  pcl::PointCloud<pcl::PointXYZ>::Ptr result(new pcl::PointCloud<pcl::PointXYZ>());
+
+  boost::shared_ptr<pcl::ModelCoefficients> plane_coefficients(new pcl::ModelCoefficients);
+
   int i = 0;
   bool found = false;
   while (i <= 3)
   {
-    pcl::PointIndices::Ptr plane_inliers = extractRamp(ground_free, ground_coefficients->values, plane_coefficients);
+    pcl::PointIndices::Ptr plane_inliers = extractRamp(cloud, axis, plane_coefficients);
     ++i;
+
+    //      ros::Duration(5.0).sleep();
 
     if (plane_coefficients->values.size() == 0)
     {
       ROS_INFO("[Downsampler]: Could not extract ramp, no ramp in field of view?");
-      return ground_free;
+      break;
     }
-
-    double plane_angle = robotPlaneAngle(ground_coefficients, plane_coefficients);
-
-    pcl::ExtractIndices<pcl::PointXYZ> extract_ramp;
-    extract_ramp.setInputCloud(ground_free);
-    extract_ramp.setIndices(plane_inliers);
-    extract_ramp.filter(*ramp);
 
     if (pub_ramp_.getNumSubscribers() > 0)
     {
-//      sensor_msgs::PointCloud2Ptr plane_msg(new sensor_msgs::PointCloud2);
-//      pcl::toROSMsg(*ramp, *plane_msg);
-//      pub_ramp_.publish(plane_msg);
+      pcl::ExtractIndices<pcl::PointXYZ> extract_ramp;
+      extract_ramp.setInputCloud(cloud);
+      extract_ramp.setIndices(plane_inliers);
+      extract_ramp.filter(*ramp);
+
+      sensor_msgs::PointCloud2Ptr plane_msg(new sensor_msgs::PointCloud2);
+      pcl::toROSMsg(*ramp, *plane_msg);
+      pub_ramp_.publish(plane_msg);
     }
 
-    if (checkPlane(ramp, plane_coefficients, plane_angle) == Ramp)
+    if (checkPlane(cloud, ground_buffer_points, plane_inliers, plane_coefficients) == Ramp)
     {
       pub_ramp_pose_.publish(coeffToOdom(plane_coefficients, "ramp"));
 
       result->clear();
 
       pcl::ExtractIndices<pcl::PointXYZ> extract_result;
-      extract_result.setInputCloud(ground_free);
+      extract_result.setInputCloud(cloud);
       extract_result.setNegative(true);
       extract_result.setIndices(plane_inliers);
       extract_result.filter(*result);
 
-      if (i > 1)
-      {
-        //move any non-ramp planes back in
-        *result = *result + *removed_planes;
-      }
+      //move any non-ramp planes back in
+      *result = *result + *removed_planes;
 
       found = true;
       break;
@@ -306,7 +351,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
     pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>());
 
     pcl::ExtractIndices<pcl::PointXYZ> extract_plane;
-    extract_plane.setInputCloud(ground_free);
+    extract_plane.setInputCloud(cloud);
     extract_plane.setIndices(plane_inliers);
     extract_plane.filter(*plane);
 
@@ -315,36 +360,89 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
     pcl::PointCloud<pcl::PointXYZ>::Ptr new_ground_free(new pcl::PointCloud<pcl::PointXYZ>());
 
     pcl::ExtractIndices<pcl::PointXYZ> extract_plane_invert;
-    extract_plane.setInputCloud(ground_free);
+    extract_plane.setInputCloud(cloud);
     extract_plane.setIndices(plane_inliers);
     extract_plane.setNegative(true);
     extract_plane.filter(*new_ground_free);
 
-    ground_free = new_ground_free;
-
-//    ros::Duration(5.0).sleep();
+    cloud = new_ground_free;
   }
-
-  if (!found)
-    ramp->clear();
 
   if (pub_ramp_.getNumSubscribers() > 0)
   {
+    if (!found)
+      ramp->clear();
+
     sensor_msgs::PointCloud2Ptr plane_msg(new sensor_msgs::PointCloud2);
     pcl::toROSMsg(*ramp, *plane_msg);
     pub_ramp_.publish(plane_msg);
   }
 
-  if(found)
-    return result;
+  if (!found)
+    result->clear();
 
-  *ground_free = *ground_free + *removed_planes;
-
-  return ground_free;
+  return result;
 }
 
-pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud,
-                                                std::vector<float>& axis,
+std::vector<pcl::PointXYZ> Downsampler::filterIndices(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                                      boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
+                                                      pcl::PointIndices::Ptr indices)
+{
+  std::vector<int> kept_indices;
+  std::vector<pcl::PointXYZ> removed_points;
+
+  std::vector<int>::iterator it;
+
+  for (it = indices->indices.begin(); it != indices->indices.end(); ++it)
+  {
+    if (pcl::pointToPlaneDistance(cloud->at(*it), plane_coeff->values[0], plane_coeff->values[1],
+                                  plane_coeff->values[2], plane_coeff->values[3]) <= 0.02)
+    {
+      kept_indices.push_back(*it);
+    }
+    else
+    {
+      removed_points.push_back(cloud->at(*it));
+    }
+  }
+
+  indices->indices.clear();
+  indices->indices.insert(indices->indices.begin(), kept_indices.begin(), kept_indices.end());
+
+  ROS_WARN_STREAM("kept_indices: " << indices->indices.size() << ", removed_points: " << removed_points.size());
+
+  return removed_points;
+}
+
+Eigen::Vector3f Downsampler::getRotatedNormal(boost::shared_ptr<pcl::ModelCoefficients> coeff, double degree)
+{
+  double a = coeff->values[0];
+  double b = coeff->values[1];
+  double c = coeff->values[2];
+  double d = coeff->values[3];
+
+  Eigen::Vector3f normal(a, b, c);
+//  normal.normalize();
+
+  Eigen::Vector3f axis(1, 0, 0);
+  Eigen::AngleAxis<float> rotation(DEG2RAD(degree), axis);
+
+  Eigen::Vector3f rotated_normal = rotation.toRotationMatrix() * normal;
+
+  tf::Vector3 tf_vec(rotated_normal(0), rotated_normal(1), rotated_normal(2));
+
+  tf::Quaternion q(0, 0, 0, 1);
+
+  tf::Transform transform;
+  transform.setOrigin(tf_vec);
+  transform.setRotation(q);
+  transform_broadcaster_.sendTransform(
+      tf::StampedTransform(transform, ros::Time::now(), "sensor_3d_short_range_depth_optical_frame", "rotated_normal"));
+
+  return rotated_normal;
+}
+
+pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud, Eigen::Vector3f& axis,
                                                 boost::shared_ptr<pcl::ModelCoefficients> coeff_out)
 {
   pcl::SACSegmentation<pcl::PointXYZ> segmentation;
@@ -355,8 +453,8 @@ pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::
   segmentation.setMaxIterations(plane_max_search_count_);
   segmentation.setDistanceThreshold(plane_max_deviation_);
 
-  segmentation.setAxis(Eigen::Vector3f(axis[0], axis[1], axis[2]));
-  segmentation.setEpsAngle(plane_max_angle_); //5 degree = 0.0872665
+  segmentation.setAxis(Eigen::Vector3f(axis(0), axis(1), axis(2)));
+  segmentation.setEpsAngle(DEG2RAD(2)); //5 degree = 0.0872665 ///TODO
 
   pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
   segmentation.setInputCloud(input_cloud);
@@ -365,86 +463,63 @@ pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::
   return inliers;
 }
 
-double Downsampler::robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> ground_coeff,
-                                    boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
-{
-  tf::Vector3 ground_vector(ground_coeff->values[0], ground_coeff->values[1], ground_coeff->values[2]);
-  tf::Vector3 plane_vector(plane_coeff->values[0], plane_coeff->values[1], plane_coeff->values[2]);
-
-  ROS_INFO_STREAM(
-      "[Downsampler]: ground_vector: " << ground_vector.getX() << ", " << ground_vector.getY() << ", " << ground_vector.getZ() << "; " << ground_coeff->values[3]);
-  ROS_INFO_STREAM(
-      "[Downsampler]: plane_vector: " << plane_vector.getX() << ", " << plane_vector.getY() << ", " << plane_vector.getZ() << "; " << plane_coeff->values[3]);
-
-  double angle = plane_vector.angle(ground_vector);
-
-  if (std::abs(angle) >= DEG2RAD(90))
-  {
-    ROS_WARN_STREAM("Flipping " << angle << " to " << angle - std::copysign(DEG2RAD(180), angle));
-    angle = angle - std::copysign(DEG2RAD(180), angle);
-  }
-
-  pub_ground_pose_.publish(coeffToOdom(ground_coeff, "ground"));
-
-  return angle;
-}
-
 Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                               boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
-                                               double plane_angle)
+                                               std::vector<pcl::PointXYZ>& ground_buffer_points,
+                                               pcl::PointIndices::Ptr plane_inliers,
+                                               boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
 {
   pub_pose_.publish(coeffToOdom(plane_coeff, "plane"));
 
   double plane_to_sensor_distance = plane_coeff->values[3];
 
   ROS_INFO_STREAM("plane_to_sensor_distance: " << plane_to_sensor_distance);
-  ROS_INFO_STREAM("plane_angle: " << plane_angle);
 
-  //check if the plane is possibly the ground plane
-  //inclination is less than threshold (1? degree)
-  if (std::abs(plane_angle) <= DEG2RAD(1.0))
+  std::vector<int>::iterator it_inlier;
+  std::vector<pcl::PointXYZ>::iterator it_ground;
+
+  int count_common = 0;
+
+  for (it_inlier = plane_inliers->indices.begin(); it_inlier != plane_inliers->indices.end(); ++it_inlier)
   {
-    ROS_INFO("Ground plane");
-    //it's a seemingly the ground plane but maybe it is just random objects which look like that
-    //check if some random normals fit
-    if (normalsOfPointsSupportThePlane(cloud, plane_coeff))
+    pcl::PointXYZ& point = cloud->at(*it_inlier);
+
+    for (it_ground = ground_buffer_points.begin(); it_ground != ground_buffer_points.end(); ++it_ground)
     {
-      return Ground;
-    }
-    else
-    {
-      return NotATraversablePlane;
+      if (it_ground->x == point.x && it_ground->y == point.y && it_ground->y == point.y)
+      {
+        ++count_common;
+      }
     }
   }
 
-  //else it could be a traversable slope, so check that
-  //A slope has to end before the robot centre
+  double min_indicies = std::min(ground_buffer_points.size(), plane_inliers->indices.size());
 
-  if (plane_angle >= 0) //incline
+  double min_common_ratio = 0.1;
+  double common_ratio = count_common / min_indicies;
+
+  ROS_INFO_STREAM(
+      "common_ratio: " << common_ratio << "; ground_buffer_points size: " << ground_buffer_points.size() << ", plane_inliers size: " << plane_inliers->indices.size());
+
+  if (common_ratio < min_common_ratio)
   {
-    ROS_INFO("Incline");
-    if (plane_to_sensor_distance < robot_center_in_camera_frame_.length())
-    {
-      ROS_INFO("Plane ends behind robot");
-      //plane does not end under the robot
-      return NotATraversablePlane;
-    }
-    ROS_INFO("Found slope");
+    ROS_ERROR_STREAM("Common ratio < " << min_common_ratio << ": " << common_ratio << "; count: " << count_common);
+    return NotATraversablePlane;
   }
-  else //decline
+  else
   {
-    ROS_INFO("Decline");
-    ///TODO find a good way to evaluate if the plane is in the wrong position
-//    if (plane_to_sensor_distance > robot_center_in_camera_frame_.length())
-//    {
-//      //plane does not end under the robot
-//      return NotATraversablePlane;
-//    }
+    ROS_INFO_STREAM("Common ratio < " << min_common_ratio << ": " << common_ratio << "; count: " << count_common);
   }
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>());
+
+  pcl::ExtractIndices<pcl::PointXYZ> extract_plane;
+  extract_plane.setInputCloud(cloud);
+  extract_plane.setIndices(plane_inliers);
+  extract_plane.filter(*plane);
 
   //it's a seemingly traversable slope but maybe it is just random objects which look like that
   //check if some random normals fit
-  if (normalsOfPointsSupportThePlane(cloud, plane_coeff))
+  if (normalsOfPointsSupportThePlane(plane, plane_coeff))
   {
     return Ramp;
   }
@@ -507,21 +582,26 @@ bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>:
 
   pcl::PointCloud<pcl::Normal>::Ptr cloud_normals(new pcl::PointCloud<pcl::Normal>);
   pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
-  pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
+  pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimation;
 
-  ne.setSearchMethod(tree);
-  ne.setInputCloud(cloud);
-  ne.setKSearch(normal_neighbours_);
-  ne.compute(*cloud_normals);
+  normal_estimation.setSearchMethod(tree);
+  normal_estimation.setInputCloud(cloud);
+  normal_estimation.setKSearch(normal_neighbours_);
+  normal_estimation.compute(*cloud_normals);
 
   ///TODO
 //make an array of n = ? random indices
 //and check if k % of the normals fit to plane
 
   pcl::PointCloud<pcl::Normal>::iterator it;
+  pcl::PointCloud<pcl::PointXYZ>::iterator cloud_it;
+
+  cloud_it = cloud->begin();
 
   double error_sum = 0.0;
   double error = 0.0;
+
+  int erase_count = 0;
 
   for (it = cloud_normals->begin(); it != cloud_normals->end(); ++it)
   {
@@ -538,11 +618,26 @@ bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>:
       error = error - std::copysign(DEG2RAD(180), error);
     }
 
-    ROS_WARN_STREAM("Error: " << error);
-    error_sum += std::abs(error);
+    error = std::abs(error);
+
+    if (error > DEG2RAD(max_angle_error_))
+    {
+      ++erase_count;
+//      cloud_it = cloud->erase(cloud_it);
+    }
+    else
+    {
+      ++cloud_it;
+    }
+
+//    ROS_WARN_STREAM("Error: " << error);
+    error_sum += error;
   }
 
   error_sum = error_sum / cloud_normals->size();
+
+  ROS_INFO_STREAM("cloud_normals size: " << cloud_normals->size());
+  ROS_INFO_STREAM("erase_count size: " << erase_count);
 
   double max_error = DEG2RAD(max_angle_error_);
 

@@ -30,12 +30,18 @@ protected:
 
   virtual void reconfigureCB(DownsamplerConfig &config, uint32_t level);
   virtual pcl::PointCloud<pcl::PointXYZ>::Ptr extractPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
-  virtual pcl::PointIndices::Ptr extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud, std::vector<float>& axis,
+  virtual pcl::PointCloud<pcl::PointXYZ>::Ptr doStuff(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud, Eigen::Vector3f& axis,
+                                                      std::vector<pcl::PointXYZ>& ground_buffer_points);
+  virtual pcl::PointIndices::Ptr extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud, Eigen::Vector3f& axis,
                                              boost::shared_ptr<pcl::ModelCoefficients> coeff_out);
-  virtual double robotPlaneAngle(boost::shared_ptr<pcl::ModelCoefficients> ground_coeff,
-                                 boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
+
+  virtual Eigen::Vector3f getRotatedNormal(boost::shared_ptr<pcl::ModelCoefficients> coeff, double degree);
+  virtual std::vector<pcl::PointXYZ> filterIndices(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                                   boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
+                                                   pcl::PointIndices::Ptr indices);
   virtual PlaneType checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                               boost::shared_ptr<pcl::ModelCoefficients> plane_coeff, double plane_angle);
+                               std::vector<pcl::PointXYZ>& ground_buffer_points, pcl::PointIndices::Ptr plane_inliers,
+                               boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
   virtual nav_msgs::OdometryPtr coeffToOdom(boost::shared_ptr<pcl::ModelCoefficients> coeff, std::string name);
   virtual bool normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                                               boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
@@ -45,6 +51,7 @@ protected:
   ros::Publisher pub_downsampled_;
   ros::Publisher pub_filtered_;
   ros::Publisher pub_ground_;
+  ros::Publisher pub_padded_ground_;
   ros::Publisher pub_ramp_;
   ros::Publisher pub_result_;
   ros::Publisher pub_ground_pose_;
