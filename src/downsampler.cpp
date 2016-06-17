@@ -2,6 +2,7 @@
 #include <pluginlib/class_list_macros.h>
 
 #include <tf/transform_listener.h>
+#include <limits>
 
 #include <boost/shared_ptr.hpp>
 #include <pcl/point_types.h>
@@ -20,6 +21,8 @@
 #include <pcl/search/kdtree.h>
 #include <pcl/console/print.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
+
+#include <std_msgs/Float32.h>
 
 #include <algorithm>
 
@@ -42,6 +45,8 @@ void Downsampler::onInit()
   pub_ground_pose_ = nh.advertise<nav_msgs::Odometry>("ground_pose", 50);
   pub_ramp_pose_ = nh.advertise<nav_msgs::Odometry>("ramp_pose", 50);
 
+  pub_angle_ = nh.advertise<std_msgs::Float32>("angle", 50);
+
   reconfigure_server_ = std::shared_ptr<dynamic_reconfigure::Server<DownsamplerConfig> >(
       new dynamic_reconfigure::Server<DownsamplerConfig>(nh));
   dynamic_reconfigure::Server<DownsamplerConfig>::CallbackType reconfigure_cb = boost::bind(&Downsampler::reconfigureCB,
@@ -57,13 +62,14 @@ void Downsampler::onInit()
   private_nh.param("min_points_threshold", min_points_threshold_, 3);
 
   private_nh.param("plane_fitting_type", plane_fitting_type_, pcl::SAC_LMEDS);
-  private_nh.param("plane_max_search_count", plane_max_search_count_, 150);
+  private_nh.param("plane_max_search_count", plane_max_search_count_, 120);
   private_nh.param("plane_max_deviation", plane_max_deviation_, 0.02);
-  private_nh.param("plane_max_angle_degree", plane_max_angle_, 5.0);
-  plane_max_angle_ = DEG2RAD(plane_max_angle_);
+  private_nh.param("plane_max_angle_degree", plane_max_degree_, 6.0);
+
+  private_nh.param("ground_max_angle", ground_max_degree_, 3.0);
 
   private_nh.param("normal_neighbours", normal_neighbours_, 8);
-  private_nh.param("max_angle_error_", max_angle_error_, 25.0);
+  private_nh.param("max_angle_error_", max_angle_error_, 20.0);
 
   double rate;
   private_nh.param("rate", rate, 30.0);
@@ -77,8 +83,6 @@ void Downsampler::onInit()
   pcl::console::setVerbosityLevel(pcl::console::L_ALWAYS);
 
   ROS_INFO_STREAM("Downsampling points using a leaf size of '" << leaf_size_ << "' m, running at " << rate << " Hz.");
-
-  lookedup_ = false;
 }
 
 void Downsampler::reconfigureCB(DownsamplerConfig &config, uint32_t level)
@@ -92,8 +96,8 @@ void Downsampler::reconfigureCB(DownsamplerConfig &config, uint32_t level)
   plane_fitting_type_ = config.plane_fitting_type;
   plane_max_search_count_ = config.plane_max_search_count;
   plane_max_deviation_ = config.plane_max_deviation;
-  plane_max_angle_ = config.plane_max_angle_degree;
-  plane_max_angle_ = DEG2RAD(plane_max_angle_);
+  plane_max_degree_ = config.plane_max_degree;
+  ground_max_degree_ = config.ground_max_degree;
 
   normal_neighbours_ = config.normal_neighbours;
   max_angle_error_ = config.max_angle_error;
@@ -101,30 +105,6 @@ void Downsampler::reconfigureCB(DownsamplerConfig &config, uint32_t level)
 
 void Downsampler::downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 {
-  if (!lookedup_)
-  {
-    tf::TransformListener tf_listener;
-    tf::StampedTransform tf_footprint_to_sensor;
-    std::string sensor_frame = "sensor_3d_short_range_depth_optical_frame"; ///TODO get automatically
-
-    tf_listener.waitForTransform("base_footprint", sensor_frame, ros::Time::now(), ros::Duration(1.0));
-    tf_listener.lookupTransform("base_footprint", sensor_frame, ros::Time(0), tf_footprint_to_sensor);
-    tf_listener.lookupTransform("base_footprint", sensor_frame, ros::Time(0), tf_footprint_to_sensor);
-
-    tf::Vector3 z_axis_point(0.0, 0.0, 0.1); ///TODO maybe different point; take care of vector direction
-    robot_axis_in_camera_frame_ = tf_footprint_to_sensor(z_axis_point);
-    robot_axis_in_camera_frame_.normalize();
-    robot_center_in_camera_frame_ = tf_footprint_to_sensor(tf::Vector3(0, 0, 0));
-    robot_center_in_camera_frame_.normalize();
-
-    ROS_ERROR_STREAM(
-        "robot_axis_in_camera_frame_: " << robot_axis_in_camera_frame_.getX() << ", " << robot_axis_in_camera_frame_.getY() << ", " << robot_axis_in_camera_frame_.getZ());
-    ROS_ERROR_STREAM(
-        "robot_center_in_camera_frame_: " << robot_center_in_camera_frame_.getX() << ", " << robot_center_in_camera_frame_.getY() << ", " << robot_center_in_camera_frame_.getZ());
-
-    lookedup_ = true;
-  }
-
   if (ros::Time::now() <= next_call_time_)
     return;
   next_call_time_ = next_call_time_ + interval_;
@@ -194,7 +174,7 @@ void Downsampler::downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cl
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
 {
-  ROS_WARN("------------------------------------");
+//  ROS_WARN("------------------------------------");
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr ground_free(new pcl::PointCloud<pcl::PointXYZ>());
   pcl::PointCloud<pcl::PointXYZ>::Ptr ground(new pcl::PointCloud<pcl::PointXYZ>());
@@ -204,16 +184,25 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
   pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices());
 
+//  if(ground_plane_coeff_.empty())
+  {
+    setGroundNormal();
+  }
+
+  std::vector<float> estimated_ground_coeff = extractGroundPlane(cloud);
+
+  Eigen::Vector3f normal(ground_plane_coeff_[0], ground_plane_coeff_[1], ground_plane_coeff_[2]);
+
   pcl::SACSegmentation<pcl::PointXYZ> segmentation;
 
   segmentation.setOptimizeCoefficients(true);
   segmentation.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
   segmentation.setMethodType(plane_fitting_type_);
-  segmentation.setDistanceThreshold(plane_max_deviation_ + 0.02); //we gotta catch'em all, so set that low
+  segmentation.setDistanceThreshold(plane_max_deviation_ + 0.01); //we gotta catch'em all, so set that low
   segmentation.setMaxIterations(plane_max_search_count_); //wanna be the very best, so set that high
 
-  segmentation.setAxis(Eigen::Vector3f(0, -0.095, -0.226)); ///TODO set automatically
-  segmentation.setEpsAngle(plane_max_angle_);
+  segmentation.setAxis(normal); ///TODO set automatically
+  segmentation.setEpsAngle(DEG2RAD(ground_max_degree_));
 
   segmentation.setInputCloud(cloud);
   segmentation.segment(*ground_inliers, *ground_coefficients);
@@ -232,7 +221,23 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
     pub_padded_ground_.publish(ground_msg);
   }
 
-  std::vector<pcl::PointXYZ> ground_buffer_points = filterIndices(cloud, ground_coefficients, ground_inliers);
+  std::vector<pcl::PointXYZ> ground_buffer_points;
+
+  if (ground_inliers->indices.size() > 0 && ground_coefficients->values.size() != 0)
+  {
+    normal = Eigen::Vector3f(ground_coefficients->values[0], ground_coefficients->values[1],
+                             ground_coefficients->values[2]);
+
+    if (ground_coefficients->values[3] < 0)
+    {
+      for (int i = 0; i < ground_coefficients->values.size(); ++i)
+      {
+        ground_coefficients->values[i] *= -1;
+      }
+    }
+
+    ground_buffer_points = filterIndices(cloud, ground_coefficients, ground_inliers);
+  }
 
   pcl::ExtractIndices<pcl::PointXYZ> remove_ground;
   remove_ground.setInputCloud(cloud);
@@ -254,39 +259,133 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
     pub_ground_.publish(ground_msg);
   }
 
-  if (ground_inliers->indices.size() == 0 || ground_coefficients->values.size() == 0)
-  {
-    ROS_INFO_THROTTLE(10, "[Downsampler]: Could not extract ground plane, no ground in field of view?");
-    return cloud;
-  }
+//  Eigen::Vector3f rotated_up = getRotatedNormal(ground_coefficients, 3.0);
+//  Eigen::Vector3f rotated_down = getRotatedNormal(ground_coefficients, -3.0);
 
-  double ground_d = ground_coefficients->values[3];
+  result = doStuff(ground_free, normal, ground_buffer_points);
 
-  if (ground_d < 0)
-  {
-    for (int i = 0; i < ground_coefficients->values.size(); ++i)
-    {
-      ground_coefficients->values[i] *= -1;
-    }
-  }
+//  if(result->empty())
+//  {
+//    ROS_INFO("----------------");
+//    result = doStuff(ground_free, rotated_down, ground_buffer_points);
+//  }
 
-  Eigen::Vector3f rotated_up = getRotatedNormal(ground_coefficients, 3.0);
-  Eigen::Vector3f rotated_down = getRotatedNormal(ground_coefficients, -3.0);
-
-  result = doStuff(ground_free, rotated_up, ground_buffer_points);
-
-  if(result->empty())
-  {
-    ROS_INFO("----------------");
-    result = doStuff(ground_free, rotated_down, ground_buffer_points);
-  }
-
-  if(result->empty())
+  if (result->empty())
   {
     return ground_free;
   }
 
   return result;
+}
+
+std::vector<float> Downsampler::extractGroundPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
+{
+  Eigen::Vector3f temp = getRotatedCoeff(ground_plane_coeff_, -plane_max_degree_);
+
+  std::vector<float> lower_plane_coeff;
+  lower_plane_coeff.push_back(temp(0));
+  lower_plane_coeff.push_back(temp(1));
+  lower_plane_coeff.push_back(temp(2));
+  pushBackLastCoeff(lower_plane_coeff, sensor_ground_downset_);
+
+  coeffToOdom(lower_plane_coeff, "lower");
+
+  double lowest_angle = lowestAngle(cloud, lower_plane_coeff);
+
+  return std::vector<float>();
+}
+
+double Downsampler::lowestAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::vector<float> plane)
+{
+  Eigen::Vector3f ground_downset_point(sensor_ground_downset_[0], sensor_ground_downset_[1], sensor_ground_downset_[2]);
+  Eigen::Vector3f ground_downset_point_offset(sensor_ground_downset_offset_[0], sensor_ground_downset_offset_[1],
+                                              sensor_ground_downset_offset_[2]);
+
+  tf::Transform transform_down;
+  transform_down.setOrigin(tf::Vector3(ground_downset_point(0), ground_downset_point(1), ground_downset_point(2)));
+  transform_down.setRotation(tf::Quaternion(0, 0, 0, 1));
+  transform_broadcaster_.sendTransform(
+      tf::StampedTransform(transform_down, ros::Time::now(), "sensor_3d_short_range_depth_optical_frame", "down"));
+
+  tf::Transform transform_down_off;
+  transform_down_off.setOrigin(
+      tf::Vector3(ground_downset_point_offset(0), ground_downset_point_offset(1), ground_downset_point_offset(2)));
+  transform_down_off.setRotation(tf::Quaternion(0, 0, 0, 1));
+  transform_broadcaster_.sendTransform(
+      tf::StampedTransform(transform_down_off, ros::Time::now(), "sensor_3d_short_range_depth_optical_frame", "off"));
+
+  Eigen::Vector3f ground_normal(ground_plane_coeff_[0], ground_plane_coeff_[1], ground_plane_coeff_[2]);
+  ground_normal.normalize();
+
+  Eigen::Vector3f sub = ground_downset_point_offset - ground_downset_point;
+  Eigen::Vector3f sub2;
+  Eigen::Vector3f normal;
+
+  double lowest_angle = DEG2RAD(plane_max_degree_);
+  double angle = 0;
+
+  Eigen::Vector3f point;
+  pcl::PointXYZ lowest_point;
+
+  ///TODO slice the point cloud up to meaningful possible points to not iterate of every point
+  for (pcl::PointCloud<pcl::PointXYZ>::iterator it = cloud->begin(); it != cloud->end(); ++it)
+  {
+    point = Eigen::Vector3f(it->x, it->y, it->z);
+    sub2 = point - ground_downset_point;
+
+    normal = sub2.cross(sub);
+    normal.normalize();
+
+    angle = std::atan2(normal(2), normal(1)) - std::atan2(ground_normal(2), ground_normal(1));
+//    angle = std::acos(normal.dot(ground_normal));
+
+    if (std::isnan(angle))
+    {
+      angle = 0.0;
+    }
+
+//    if (std::abs(angle) >= DEG2RAD(90))
+//    {
+//      angle = angle - std::copysign(DEG2RAD(180), angle);
+//    }
+
+//    ROS_INFO_STREAM("normal: " << normal);
+//    ROS_INFO_STREAM("ground_normal: " << ground_normal);
+//    ROS_INFO_STREAM("angle: " << RAD2DEG(angle));
+
+//    double a = coeff[0];
+//    double b = coeff[1];
+//    double c = coeff[2];
+//
+//    Eigen::Vector3f normal(a, b, c);
+//  //  normal.normalize();
+//
+//    Eigen::Vector3f axis(1, 0, 0);
+//    Eigen::AngleAxis<float> rotation(DEG2RAD(degree), axis);
+//
+//    Eigen::Vector3f rotated_normal = rotation.toRotationMatrix() * normal;
+
+    if (std::abs(angle) <= DEG2RAD(plane_max_degree_) && angle < lowest_angle)
+    {
+      lowest_angle = angle;
+      lowest_point = *it;
+    }
+  }
+
+  std_msgs::Float32 msgs;
+  msgs.data = RAD2DEG(lowest_angle);
+  pub_angle_.publish(msgs);
+
+//  ROS_INFO_STREAM(
+//      "lowest point: " << lowest_point.x << ", " << lowest_point.y << ", " << lowest_point.z << "; lowest_angle: " << RAD2DEG(lowest_angle));
+
+  tf::Transform transform;
+  transform.setOrigin(tf::Vector3(lowest_point.x, lowest_point.y, lowest_point.z));
+  transform.setRotation(tf::Quaternion(0, 0, 0, 1));
+  transform_broadcaster_.sendTransform(
+      tf::StampedTransform(transform, ros::Time::now(), "sensor_3d_short_range_depth_optical_frame", "lowest")); ///TODO
+
+  return lowest_angle;
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::doStuff(pcl::PointCloud<pcl::PointXYZ>::Ptr ground_free,
@@ -307,11 +406,9 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::doStuff(pcl::PointCloud<pcl::Po
     pcl::PointIndices::Ptr plane_inliers = extractRamp(cloud, axis, plane_coefficients);
     ++i;
 
-    //      ros::Duration(5.0).sleep();
-
     if (plane_coefficients->values.size() == 0)
     {
-      ROS_INFO("[Downsampler]: Could not extract ramp, no ramp in field of view?");
+//      ROS_INFO("[Downsampler]: Could not extract ramp, no ramp in field of view?");
       break;
     }
 
@@ -327,9 +424,11 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::doStuff(pcl::PointCloud<pcl::Po
       pub_ramp_.publish(plane_msg);
     }
 
+//    ros::Duration(5.0).sleep();
+
     if (checkPlane(cloud, ground_buffer_points, plane_inliers, plane_coefficients) == Ramp)
     {
-      pub_ramp_pose_.publish(coeffToOdom(plane_coefficients, "ramp"));
+//      pub_ramp_pose_.publish(coeffToOdom(plane_coefficients, "ramp"));
 
       result->clear();
 
@@ -395,8 +494,8 @@ std::vector<pcl::PointXYZ> Downsampler::filterIndices(pcl::PointCloud<pcl::Point
 
   for (it = indices->indices.begin(); it != indices->indices.end(); ++it)
   {
-    if (pcl::pointToPlaneDistance(cloud->at(*it), plane_coeff->values[0], plane_coeff->values[1],
-                                  plane_coeff->values[2], plane_coeff->values[3]) <= 0.02)
+    if (pcl::pointToPlaneDistanceSigned(cloud->at(*it), plane_coeff->values[0], plane_coeff->values[1],
+                                        plane_coeff->values[2], plane_coeff->values[3]) <= 0.02)
     {
       kept_indices.push_back(*it);
     }
@@ -409,17 +508,18 @@ std::vector<pcl::PointXYZ> Downsampler::filterIndices(pcl::PointCloud<pcl::Point
   indices->indices.clear();
   indices->indices.insert(indices->indices.begin(), kept_indices.begin(), kept_indices.end());
 
-  ROS_WARN_STREAM("kept_indices: " << indices->indices.size() << ", removed_points: " << removed_points.size());
+//  ROS_WARN_STREAM("kept_indices: " << indices->indices.size() << ", removed_points: " << removed_points.size());
 
   return removed_points;
 }
 
-Eigen::Vector3f Downsampler::getRotatedNormal(boost::shared_ptr<pcl::ModelCoefficients> coeff, double degree)
+Eigen::Vector3f Downsampler::getRotatedCoeff(std::vector<float> coeff, double degree)
 {
-  double a = coeff->values[0];
-  double b = coeff->values[1];
-  double c = coeff->values[2];
-  double d = coeff->values[3];
+//rotated around the point defined by the "normal of the vector";
+
+  double a = coeff[0];
+  double b = coeff[1];
+  double c = coeff[2];
 
   Eigen::Vector3f normal(a, b, c);
 //  normal.normalize();
@@ -454,7 +554,7 @@ pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::
   segmentation.setDistanceThreshold(plane_max_deviation_);
 
   segmentation.setAxis(Eigen::Vector3f(axis(0), axis(1), axis(2)));
-  segmentation.setEpsAngle(DEG2RAD(2)); //5 degree = 0.0872665 ///TODO
+  segmentation.setEpsAngle(DEG2RAD(plane_max_degree_)); //5 degree = 0.0872665 ///TODO
 
   pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
   segmentation.setInputCloud(input_cloud);
@@ -468,12 +568,38 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
                                                pcl::PointIndices::Ptr plane_inliers,
                                                boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
 {
-  pub_pose_.publish(coeffToOdom(plane_coeff, "plane"));
+//  pub_pose_.publish(coeffToOdom(plane_coeff, "plane"));
 
-  double plane_to_sensor_distance = plane_coeff->values[3];
+  if (!ground_buffer_points.empty() && !checkCommon(cloud, ground_buffer_points, plane_inliers))
+  {
+    return NotATraversablePlane;
+  }
 
-  ROS_INFO_STREAM("plane_to_sensor_distance: " << plane_to_sensor_distance);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>());
 
+  pcl::ExtractIndices<pcl::PointXYZ> extract_plane;
+  extract_plane.setInputCloud(cloud);
+  extract_plane.setIndices(plane_inliers);
+  extract_plane.filter(*plane);
+
+  filterByNormals(plane, plane_inliers, plane_coeff);
+
+  if (plane_inliers->indices.empty())
+  {
+    return NotATraversablePlane;
+  }
+
+  if (!ground_buffer_points.empty() && checkCommon(cloud, ground_buffer_points, plane_inliers))
+  {
+    return Ramp;
+  }
+
+  return NotATraversablePlane;
+}
+
+bool Downsampler::checkCommon(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                              std::vector<pcl::PointXYZ>& ground_buffer_points, pcl::PointIndices::Ptr plane_inliers)
+{
   std::vector<int>::iterator it_inlier;
   std::vector<pcl::PointXYZ>::iterator it_ground;
 
@@ -497,49 +623,35 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
   double min_common_ratio = 0.1;
   double common_ratio = count_common / min_indicies;
 
-  ROS_INFO_STREAM(
-      "common_ratio: " << common_ratio << "; ground_buffer_points size: " << ground_buffer_points.size() << ", plane_inliers size: " << plane_inliers->indices.size());
+//  ROS_INFO_STREAM(
+//      "ground_buffer_points size: " << ground_buffer_points.size() << ", plane_inliers size: " << plane_inliers->indices.size());
 
   if (common_ratio < min_common_ratio)
   {
-    ROS_ERROR_STREAM("Common ratio < " << min_common_ratio << ": " << common_ratio << "; count: " << count_common);
-    return NotATraversablePlane;
+//    ROS_ERROR_STREAM("Common ratio < " << min_common_ratio << ": " << common_ratio << "; count: " << count_common);
+    return false;
   }
   else
   {
-    ROS_INFO_STREAM("Common ratio < " << min_common_ratio << ": " << common_ratio << "; count: " << count_common);
+//    ROS_INFO_STREAM("Common ratio < " << min_common_ratio << ": " << common_ratio << "; count: " << count_common);
   }
 
-  pcl::PointCloud<pcl::PointXYZ>::Ptr plane(new pcl::PointCloud<pcl::PointXYZ>());
-
-  pcl::ExtractIndices<pcl::PointXYZ> extract_plane;
-  extract_plane.setInputCloud(cloud);
-  extract_plane.setIndices(plane_inliers);
-  extract_plane.filter(*plane);
-
-  //it's a seemingly traversable slope but maybe it is just random objects which look like that
-  //check if some random normals fit
-  if (normalsOfPointsSupportThePlane(plane, plane_coeff))
-  {
-    return Ramp;
-  }
-
-  return NotATraversablePlane;
+  return true;
 }
 
-nav_msgs::OdometryPtr Downsampler::coeffToOdom(boost::shared_ptr<pcl::ModelCoefficients> coeff, std::string name)
+nav_msgs::OdometryPtr Downsampler::coeffToOdom(std::vector<float> coeff, std::string name)
 {
-  double a = coeff->values[0];
-  double b = coeff->values[1];
-  double c = coeff->values[2];
-  double d = coeff->values[3];
+  double a = coeff[0];
+  double b = coeff[1];
+  double c = coeff[2];
+  double d = coeff[3];
 
   tf::Vector3 normal(a, b, c);
   normal.normalize();
 
   double length_squared = a * a + b * b + c * c;
 
-  //get closest point to the origin of the plane
+//get closest point to the origin of the plane
   double scale = -d / length_squared;
   double x = a * scale;
   double y = b * scale;
@@ -575,8 +687,8 @@ nav_msgs::OdometryPtr Downsampler::coeffToOdom(boost::shared_ptr<pcl::ModelCoeff
   return odom_msg;
 }
 
-bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                                 boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
+void Downsampler::filterByNormals(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, pcl::PointIndices::Ptr plane_inliers,
+                                  boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
 {
   Eigen::Vector3f plane_normal(plane_coeff->values[0], plane_coeff->values[1], plane_coeff->values[2]);
 
@@ -589,28 +701,28 @@ bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>:
   normal_estimation.setKSearch(normal_neighbours_);
   normal_estimation.compute(*cloud_normals);
 
-  ///TODO
+///TODO
 //make an array of n = ? random indices
 //and check if k % of the normals fit to plane
 
   pcl::PointCloud<pcl::Normal>::iterator it;
   pcl::PointCloud<pcl::PointXYZ>::iterator cloud_it;
+  std::vector<int> kept_inliers;
 
   cloud_it = cloud->begin();
 
-  double error_sum = 0.0;
   double error = 0.0;
 
-  int erase_count = 0;
+  int inlier_index = 0;
 
-  for (it = cloud_normals->begin(); it != cloud_normals->end(); ++it)
+  for (it = cloud_normals->begin(); it != cloud_normals->end(); ++it, ++inlier_index)
   {
     Eigen::Vector3f normal = (*it).getNormalVector3fMap();
     error = std::acos(plane_normal.dot(normal));
 
     if (std::isnan(error))
     {
-      error = 0;
+      continue;
     }
 
     if (std::abs(error) >= DEG2RAD(90))
@@ -618,44 +730,95 @@ bool Downsampler::normalsOfPointsSupportThePlane(pcl::PointCloud<pcl::PointXYZ>:
       error = error - std::copysign(DEG2RAD(180), error);
     }
 
-    error = std::abs(error);
-
-    if (error > DEG2RAD(max_angle_error_))
+    if (std::abs(error) <= DEG2RAD(max_angle_error_))
     {
-      ++erase_count;
-//      cloud_it = cloud->erase(cloud_it);
+      kept_inliers.push_back(plane_inliers->indices[inlier_index]);
     }
-    else
-    {
-      ++cloud_it;
-    }
-
-//    ROS_WARN_STREAM("Error: " << error);
-    error_sum += error;
   }
 
-  error_sum = error_sum / cloud_normals->size();
+//  ROS_INFO_STREAM("kept " << kept_inliers.size() << " of " << plane_inliers->indices.size());
 
-  ROS_INFO_STREAM("cloud_normals size: " << cloud_normals->size());
-  ROS_INFO_STREAM("erase_count size: " << erase_count);
-
-  double max_error = DEG2RAD(max_angle_error_);
-
-  if (error_sum >= max_error)
-  {
-    ROS_ERROR_STREAM(
-        "angle_error > " << RAD2DEG(max_error) << " deg: " << RAD2DEG(error_sum) << "; size: " << cloud_normals->size());
-    return false;
-  }
-
-  ROS_WARN_STREAM("angle_error: " << RAD2DEG(error_sum) << "; size: " << cloud_normals->size());
-
-  return true;
+  plane_inliers->indices.clear();
+  plane_inliers->indices.insert(plane_inliers->indices.begin(), kept_inliers.begin(), kept_inliers.end());
 }
 
-bool Downsampler::approximateNormal(pcl::Normal normal_out)
+void Downsampler::setGroundNormal()
 {
-  return true;
+  tf::TransformListener tf_listener;
+  tf::StampedTransform tf_footprint_to_sensor;
+  tf::StampedTransform tf_sensor_to_footprint;
+  std::string sensor_frame = "sensor_3d_short_range_depth_optical_frame"; ///TODO get automatically
+
+  tf_listener.waitForTransform(sensor_frame, "base_footprint", ros::Time::now(), ros::Duration(1.0));
+  tf_listener.lookupTransform(sensor_frame, "base_footprint", ros::Time(0), tf_footprint_to_sensor);
+  tf_listener.lookupTransform("base_footprint", sensor_frame, ros::Time(0), tf_sensor_to_footprint);
+
+  tf::Vector3 origin = tf_sensor_to_footprint.getOrigin();
+
+  tf::Quaternion q(0, 0, 0, 1);
+
+  tf::Vector3 sensor_ground_point_in_sensor = tf_footprint_to_sensor(tf::Vector3(origin.getX(), 0.0, 0.0));
+  tf::Vector3 sensor_ground_downset_in_sensor = tf_footprint_to_sensor(
+      tf::Vector3(origin.getX(), 0.0, -plane_max_deviation_));
+  tf::Vector3 sensor_ground_downset_offset_in_sensor = tf_footprint_to_sensor(
+      tf::Vector3(origin.getX(), 1.0, -plane_max_deviation_));
+  tf::Vector3 sensor_ground_upset_in_sensor = tf_footprint_to_sensor(
+      tf::Vector3(origin.getX(), 0.0, plane_max_deviation_));
+
+  tf::Vector3 add_point_in_footprint(0.0, 0.0, origin.getZ()); ///TODO maybe different point; take care of vector direction
+  tf::Vector3 footprint_in_sensor = tf_footprint_to_sensor(tf::Vector3(0, 0, 0));
+  tf::Vector3 add_point_in_sensor = tf_footprint_to_sensor(add_point_in_footprint);
+
+  sensor_ground_.push_back(sensor_ground_point_in_sensor.getX());
+  sensor_ground_.push_back(sensor_ground_point_in_sensor.getY());
+  sensor_ground_.push_back(sensor_ground_point_in_sensor.getZ());
+
+  sensor_ground_downset_.push_back(sensor_ground_downset_in_sensor.getX());
+  sensor_ground_downset_.push_back(sensor_ground_downset_in_sensor.getY());
+  sensor_ground_downset_.push_back(sensor_ground_downset_in_sensor.getZ());
+
+  sensor_ground_downset_offset_.push_back(sensor_ground_downset_offset_in_sensor.getX());
+  sensor_ground_downset_offset_.push_back(sensor_ground_downset_offset_in_sensor.getY());
+  sensor_ground_downset_offset_.push_back(sensor_ground_downset_offset_in_sensor.getZ());
+
+  sensor_ground_upset_.push_back(sensor_ground_upset_in_sensor.getX());
+  sensor_ground_upset_.push_back(sensor_ground_upset_in_sensor.getY());
+  sensor_ground_upset_.push_back(sensor_ground_upset_in_sensor.getZ());
+
+  tf::Transform transform_result;
+  transform_result.setOrigin(sensor_ground_point_in_sensor);
+  transform_result.setRotation(tf_footprint_to_sensor.getRotation());
+
+  tf::StampedTransform tf_sensor_to_plane = tf::StampedTransform(transform_result, ros::Time::now(),
+                                                                 "sensor_3d_short_range_depth_optical_frame",
+                                                                 "sensor_ground");
+  transform_broadcaster_.sendTransform(tf_sensor_to_plane);
+
+  tf::Vector3 ground_normal = add_point_in_sensor - footprint_in_sensor;
+
+//  ROS_INFO_STREAM("test: " << ground_normal.getX() << ", " << ground_normal.getY() << ", " << ground_normal.getZ());
+
+  tf::Transform transform_test;
+  transform_test.setOrigin(ground_normal);
+  transform_test.setRotation(q);
+  transform_broadcaster_.sendTransform(
+      tf::StampedTransform(transform_test, ros::Time::now(), "sensor_3d_short_range_depth_optical_frame",
+                           "ground_normal"));
+
+  ground_plane_coeff_.push_back(ground_normal.getX());
+  ground_plane_coeff_.push_back(ground_normal.getY());
+  ground_plane_coeff_.push_back(ground_normal.getZ());
+  ground_plane_coeff_.push_back(origin.getZ());
+}
+
+void Downsampler::pushBackLastCoeff(std::vector<float>& three_coeffs, std::vector<float> plane_point)
+{
+//ax + by + cz + d = 0
+//-d = ax + by + cz
+
+  double d = three_coeffs[0] * plane_point[0] + three_coeffs[1] * plane_point[1] + three_coeffs[2] * plane_point[2];
+
+  three_coeffs.push_back(-d);
 }
 
 } //end namespace
