@@ -12,6 +12,7 @@
 #include <tf/LinearMath/Vector3.h>
 #include <tf/transform_broadcaster.h>
 #include <nav_msgs/Odometry.h>
+#include <tuple>
 
 namespace downsampler
 {
@@ -31,22 +32,23 @@ protected:
   virtual void reconfigureCB(DownsamplerConfig &config, uint32_t level);
   virtual pcl::PointCloud<pcl::PointXYZ>::Ptr extractPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
   virtual std::vector<float> extractGroundPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
-  virtual double lowestAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::vector<float> plane);
+  virtual double lowestAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
+  virtual std::tuple<pcl::PointIndices::Ptr, pcl::PointIndices::Ptr> getGroundIndicies(
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::vector<float> plane);
+  virtual std::shared_ptr<std::vector<pcl::PointXYZ> > getPaddingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                                                        pcl::PointIndices::Ptr padding_indices);
 
   virtual pcl::PointCloud<pcl::PointXYZ>::Ptr doStuff(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud,
                                                       Eigen::Vector3f& axis,
-                                                      std::vector<pcl::PointXYZ>& ground_buffer_points);
+                                                      std::vector<pcl::PointXYZ>& ground_padding_points);
   virtual pcl::PointIndices::Ptr extractRamp(pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud, Eigen::Vector3f& axis,
                                              boost::shared_ptr<pcl::ModelCoefficients> coeff_out);
 
   virtual Eigen::Vector3f getRotatedCoeff(std::vector<float>, double degree);
-  virtual std::vector<pcl::PointXYZ> filterIndices(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                                   boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
-                                                   pcl::PointIndices::Ptr indices);
   virtual PlaneType checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                               std::vector<pcl::PointXYZ>& ground_buffer_points, pcl::PointIndices::Ptr plane_inliers,
+                               std::vector<pcl::PointXYZ>& ground_padding_points, pcl::PointIndices::Ptr plane_inliers,
                                boost::shared_ptr<pcl::ModelCoefficients> plane_coeff);
-  virtual bool checkCommon(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::vector<pcl::PointXYZ>& ground_buffer_points,
+  virtual bool checkCommon(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::vector<pcl::PointXYZ>& ground_padding_points,
                            pcl::PointIndices::Ptr plane_inliers);
   virtual nav_msgs::OdometryPtr coeffToOdom(std::vector<float> coeff, std::string name);
   virtual void filterByNormals(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, pcl::PointIndices::Ptr plane_inliers,
@@ -59,7 +61,7 @@ protected:
   ros::Publisher pub_downsampled_;
   ros::Publisher pub_filtered_;
   ros::Publisher pub_ground_;
-  ros::Publisher pub_padded_ground_;
+  ros::Publisher pub_padding_;
   ros::Publisher pub_ramp_;
   ros::Publisher pub_result_;
   ros::Publisher pub_ground_pose_;
@@ -84,6 +86,10 @@ protected:
   double plane_max_deviation_;
   double plane_max_degree_;
   double ground_max_degree_;
+
+  double x_rotation_;
+  double y_rotation_;
+  double z_rotation_;
 
   std::vector<float> ground_plane_coeff_;
   std::vector<float> sensor_ground_;

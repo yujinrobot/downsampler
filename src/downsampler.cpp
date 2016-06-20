@@ -38,7 +38,7 @@ void Downsampler::onInit()
   pub_filtered_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("filtered_points", 1);
   pub_ramp_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("ramp_points", 1);
   pub_ground_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("ground_points", 1);
-  pub_padded_ground_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("padded_ground_points", 1);
+  pub_padding_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("padding_points", 1);
   pub_result_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("result_points", 1);
 
   pub_pose_ = nh.advertise<nav_msgs::Odometry>("plane_pose", 50);
@@ -101,6 +101,10 @@ void Downsampler::reconfigureCB(DownsamplerConfig &config, uint32_t level)
 
   normal_neighbours_ = config.normal_neighbours;
   max_angle_error_ = config.max_angle_error;
+
+  x_rotation_ = config.x_rotation;
+  y_rotation_ = config.y_rotation;
+  z_rotation_ = config.z_rotation;
 }
 
 void Downsampler::downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
@@ -177,12 +181,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 //  ROS_WARN("------------------------------------");
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr ground_free(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::PointCloud<pcl::PointXYZ>::Ptr ground(new pcl::PointCloud<pcl::PointXYZ>());
   pcl::PointCloud<pcl::PointXYZ>::Ptr result(new pcl::PointCloud<pcl::PointXYZ>());
-
-  boost::shared_ptr<pcl::ModelCoefficients> ground_coefficients(new pcl::ModelCoefficients);
-
-  pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices());
 
 //  if(ground_plane_coeff_.empty())
   {
@@ -190,68 +189,40 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
   }
 
   std::vector<float> estimated_ground_coeff = extractGroundPlane(cloud);
+  std::tuple<pcl::PointIndices::Ptr, pcl::PointIndices::Ptr> ground_inliers = getGroundIndicies(cloud,
+                                                                                                estimated_ground_coeff);
+  pcl::PointIndices::Ptr ground_indices = std::get<0>(ground_inliers);
+  pcl::PointIndices::Ptr padding_indices = std::get<1>(ground_inliers);
 
-  Eigen::Vector3f normal(ground_plane_coeff_[0], ground_plane_coeff_[1], ground_plane_coeff_[2]);
+  Eigen::Vector3f normal(estimated_ground_coeff[0], estimated_ground_coeff[1], estimated_ground_coeff[2]);
 
-  pcl::SACSegmentation<pcl::PointXYZ> segmentation;
+  std::shared_ptr<std::vector<pcl::PointXYZ> > padding_points = getPaddingPoints(cloud, padding_indices);
 
-  segmentation.setOptimizeCoefficients(true);
-  segmentation.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
-  segmentation.setMethodType(plane_fitting_type_);
-  segmentation.setDistanceThreshold(plane_max_deviation_ + 0.01); //we gotta catch'em all, so set that low
-  segmentation.setMaxIterations(plane_max_search_count_); //wanna be the very best, so set that high
-
-  segmentation.setAxis(normal); ///TODO set automatically
-  segmentation.setEpsAngle(DEG2RAD(ground_max_degree_));
-
-  segmentation.setInputCloud(cloud);
-  segmentation.segment(*ground_inliers, *ground_coefficients);
-
-  ///TODO make sure the ground is near the ground
-
-  if (pub_padded_ground_.getNumSubscribers() > 0)
+  if (pub_padding_.getNumSubscribers() > 0)
   {
-    pcl::ExtractIndices<pcl::PointXYZ> extract_ground;
-    extract_ground.setInputCloud(cloud);
-    extract_ground.setIndices(ground_inliers);
-    extract_ground.filter(*ground);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr padding(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::ExtractIndices<pcl::PointXYZ> extract_padding;
+    extract_padding.setInputCloud(cloud);
+    extract_padding.setIndices(padding_indices);
+    extract_padding.filter(*padding);
 
     sensor_msgs::PointCloud2Ptr ground_msg(new sensor_msgs::PointCloud2);
-    pcl::toROSMsg(*ground, *ground_msg);
-    pub_padded_ground_.publish(ground_msg);
-  }
-
-  std::vector<pcl::PointXYZ> ground_buffer_points;
-
-  if (ground_inliers->indices.size() > 0 && ground_coefficients->values.size() != 0)
-  {
-    normal = Eigen::Vector3f(ground_coefficients->values[0], ground_coefficients->values[1],
-                             ground_coefficients->values[2]);
-
-    if (ground_coefficients->values[3] < 0)
-    {
-      for (int i = 0; i < ground_coefficients->values.size(); ++i)
-      {
-        ground_coefficients->values[i] *= -1;
-      }
-    }
-
-    ground_buffer_points = filterIndices(cloud, ground_coefficients, ground_inliers);
+    pcl::toROSMsg(*padding, *ground_msg);
+    pub_padding_.publish(ground_msg);
   }
 
   pcl::ExtractIndices<pcl::PointXYZ> remove_ground;
   remove_ground.setInputCloud(cloud);
-  remove_ground.setIndices(ground_inliers);
+  remove_ground.setIndices(ground_indices);
   remove_ground.setNegative(true);
   remove_ground.filter(*ground_free);
 
   if (pub_ground_.getNumSubscribers() > 0)
   {
-    ground->clear();
-
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::ExtractIndices<pcl::PointXYZ> extract_ground;
     extract_ground.setInputCloud(cloud);
-    extract_ground.setIndices(ground_inliers);
+    extract_ground.setIndices(ground_indices);
     extract_ground.filter(*ground);
 
     sensor_msgs::PointCloud2Ptr ground_msg(new sensor_msgs::PointCloud2);
@@ -262,7 +233,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 //  Eigen::Vector3f rotated_up = getRotatedNormal(ground_coefficients, 3.0);
 //  Eigen::Vector3f rotated_down = getRotatedNormal(ground_coefficients, -3.0);
 
-  result = doStuff(ground_free, normal, ground_buffer_points);
+  result = doStuff(ground_free, normal, *padding_points);
 
 //  if(result->empty())
 //  {
@@ -280,27 +251,28 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::extractPlanes(pcl::PointCloud<p
 
 std::vector<float> Downsampler::extractGroundPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
 {
-  Eigen::Vector3f temp = getRotatedCoeff(ground_plane_coeff_, -plane_max_degree_);
+  double lowest_angle = lowestAngle(cloud);
+
+  Eigen::Vector3f rotated_ground_normal = getRotatedCoeff(ground_plane_coeff_, lowest_angle);
 
   std::vector<float> lower_plane_coeff;
-  lower_plane_coeff.push_back(temp(0));
-  lower_plane_coeff.push_back(temp(1));
-  lower_plane_coeff.push_back(temp(2));
-  pushBackLastCoeff(lower_plane_coeff, sensor_ground_downset_);
+  lower_plane_coeff.push_back(rotated_ground_normal(0));
+  lower_plane_coeff.push_back(rotated_ground_normal(1));
+  lower_plane_coeff.push_back(rotated_ground_normal(2));
+  pushBackLastCoeff(lower_plane_coeff, sensor_ground_);
 
   coeffToOdom(lower_plane_coeff, "lower");
 
-  double lowest_angle = lowestAngle(cloud, lower_plane_coeff);
-
-  return std::vector<float>();
+  return lower_plane_coeff;
 }
 
-double Downsampler::lowestAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::vector<float> plane)
+double Downsampler::lowestAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
 {
   Eigen::Vector3f ground_downset_point(sensor_ground_downset_[0], sensor_ground_downset_[1], sensor_ground_downset_[2]);
   Eigen::Vector3f ground_downset_point_offset(sensor_ground_downset_offset_[0], sensor_ground_downset_offset_[1],
                                               sensor_ground_downset_offset_[2]);
 
+  ///TODO only do once
   tf::Transform transform_down;
   transform_down.setOrigin(tf::Vector3(ground_downset_point(0), ground_downset_point(1), ground_downset_point(2)));
   transform_down.setRotation(tf::Quaternion(0, 0, 0, 1));
@@ -388,9 +360,54 @@ double Downsampler::lowestAngle(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::
   return lowest_angle;
 }
 
+std::tuple<pcl::PointIndices::Ptr, pcl::PointIndices::Ptr> Downsampler::getGroundIndicies(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, std::vector<float> plane)
+{
+  pcl::PointIndices::Ptr indicies(new pcl::PointIndices());
+  pcl::PointIndices::Ptr indicies_padded(new pcl::PointIndices());
+
+  double distance = 0;
+
+  for (int i = 0; i < cloud->points.size(); ++i)
+  {
+    distance = pcl::pointToPlaneDistanceSigned(cloud->points[i], plane[0], plane[1], plane[2], plane[3]);
+
+    if (distance <= 0.03) ///TODO
+    {
+      if (distance <= 0.02)
+      {
+        indicies->indices.push_back(i);
+//        if (distance < 0.0)
+//        {
+//          //point under the ground -> remove because is noise
+//        }
+      }
+      else
+      {
+        indicies_padded->indices.push_back(i);
+      }
+    }
+  }
+
+  return std::tuple<pcl::PointIndices::Ptr, pcl::PointIndices::Ptr>(indicies, indicies_padded);
+}
+
+std::shared_ptr<std::vector<pcl::PointXYZ> > Downsampler::getPaddingPoints(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                                                           pcl::PointIndices::Ptr padding_indices)
+{
+  std::shared_ptr<std::vector<pcl::PointXYZ> > padding_points(new std::vector<pcl::PointXYZ>());
+
+  for (std::vector<int>::iterator it = padding_indices->indices.begin(); it != padding_indices->indices.end(); ++it)
+  {
+    padding_points->push_back(cloud->points[*it]);
+  }
+
+  return padding_points;
+}
+
 pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::doStuff(pcl::PointCloud<pcl::PointXYZ>::Ptr ground_free,
                                                          Eigen::Vector3f& axis,
-                                                         std::vector<pcl::PointXYZ>& ground_buffer_points)
+                                                         std::vector<pcl::PointXYZ>& ground_padding_points)
 {
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>(*ground_free));
   pcl::PointCloud<pcl::PointXYZ>::Ptr ramp(new pcl::PointCloud<pcl::PointXYZ>());
@@ -426,7 +443,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::doStuff(pcl::PointCloud<pcl::Po
 
 //    ros::Duration(5.0).sleep();
 
-    if (checkPlane(cloud, ground_buffer_points, plane_inliers, plane_coefficients) == Ramp)
+    if (checkPlane(cloud, ground_padding_points, plane_inliers, plane_coefficients) == Ramp)
     {
 //      pub_ramp_pose_.publish(coeffToOdom(plane_coefficients, "ramp"));
 
@@ -483,36 +500,6 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Downsampler::doStuff(pcl::PointCloud<pcl::Po
   return result;
 }
 
-std::vector<pcl::PointXYZ> Downsampler::filterIndices(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                                      boost::shared_ptr<pcl::ModelCoefficients> plane_coeff,
-                                                      pcl::PointIndices::Ptr indices)
-{
-  std::vector<int> kept_indices;
-  std::vector<pcl::PointXYZ> removed_points;
-
-  std::vector<int>::iterator it;
-
-  for (it = indices->indices.begin(); it != indices->indices.end(); ++it)
-  {
-    if (pcl::pointToPlaneDistanceSigned(cloud->at(*it), plane_coeff->values[0], plane_coeff->values[1],
-                                        plane_coeff->values[2], plane_coeff->values[3]) <= 0.02)
-    {
-      kept_indices.push_back(*it);
-    }
-    else
-    {
-      removed_points.push_back(cloud->at(*it));
-    }
-  }
-
-  indices->indices.clear();
-  indices->indices.insert(indices->indices.begin(), kept_indices.begin(), kept_indices.end());
-
-//  ROS_WARN_STREAM("kept_indices: " << indices->indices.size() << ", removed_points: " << removed_points.size());
-
-  return removed_points;
-}
-
 Eigen::Vector3f Downsampler::getRotatedCoeff(std::vector<float> coeff, double degree)
 {
 //rotated around the point defined by the "normal of the vector";
@@ -564,13 +551,13 @@ pcl::PointIndices::Ptr Downsampler::extractRamp(pcl::PointCloud<pcl::PointXYZ>::
 }
 
 Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                                               std::vector<pcl::PointXYZ>& ground_buffer_points,
+                                               std::vector<pcl::PointXYZ>& ground_padding_points,
                                                pcl::PointIndices::Ptr plane_inliers,
                                                boost::shared_ptr<pcl::ModelCoefficients> plane_coeff)
 {
 //  pub_pose_.publish(coeffToOdom(plane_coeff, "plane"));
 
-  if (!ground_buffer_points.empty() && !checkCommon(cloud, ground_buffer_points, plane_inliers))
+  if (!ground_padding_points.empty() && !checkCommon(cloud, ground_padding_points, plane_inliers))
   {
     return NotATraversablePlane;
   }
@@ -589,7 +576,7 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
     return NotATraversablePlane;
   }
 
-  if (!ground_buffer_points.empty() && checkCommon(cloud, ground_buffer_points, plane_inliers))
+  if (!ground_padding_points.empty() && checkCommon(cloud, ground_padding_points, plane_inliers))
   {
     return Ramp;
   }
@@ -598,7 +585,7 @@ Downsampler::PlaneType Downsampler::checkPlane(pcl::PointCloud<pcl::PointXYZ>::P
 }
 
 bool Downsampler::checkCommon(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                              std::vector<pcl::PointXYZ>& ground_buffer_points, pcl::PointIndices::Ptr plane_inliers)
+                              std::vector<pcl::PointXYZ>& ground_padding_points, pcl::PointIndices::Ptr plane_inliers)
 {
   std::vector<int>::iterator it_inlier;
   std::vector<pcl::PointXYZ>::iterator it_ground;
@@ -609,7 +596,7 @@ bool Downsampler::checkCommon(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
   {
     pcl::PointXYZ& point = cloud->at(*it_inlier);
 
-    for (it_ground = ground_buffer_points.begin(); it_ground != ground_buffer_points.end(); ++it_ground)
+    for (it_ground = ground_padding_points.begin(); it_ground != ground_padding_points.end(); ++it_ground)
     {
       if (it_ground->x == point.x && it_ground->y == point.y && it_ground->y == point.y)
       {
@@ -618,7 +605,7 @@ bool Downsampler::checkCommon(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
     }
   }
 
-  double min_indicies = std::min(ground_buffer_points.size(), plane_inliers->indices.size());
+  double min_indicies = std::min(ground_padding_points.size(), plane_inliers->indices.size());
 
   double min_common_ratio = 0.1;
   double common_ratio = count_common / min_indicies;
@@ -753,6 +740,15 @@ void Downsampler::setGroundNormal()
   tf_listener.lookupTransform(sensor_frame, "base_footprint", ros::Time(0), tf_footprint_to_sensor);
   tf_listener.lookupTransform("base_footprint", sensor_frame, ros::Time(0), tf_sensor_to_footprint);
 
+//  tf::Quaternion adjustment;
+//  adjustment.setRPY(x_rotation_, z_rotation_, y_rotation_);
+//  tf::Quaternion before = tf_footprint_to_sensor.getRotation();
+//  ROS_INFO_STREAM("before: " << before.x() << ", " << before.y() << ", " << before.z() << ", " << before.w());
+//  tf_footprint_to_sensor.setRotation(tf_footprint_to_sensor.getRotation() * adjustment);
+//  tf::Quaternion after = tf_footprint_to_sensor.getRotation();
+//  ROS_INFO_STREAM("after: " << after.x() << ", " << after.y() << ", " << after.z() << ", " << after.w());
+//  ground_normal = tf::quatRotate(adjustment, ground_normal);
+
   tf::Vector3 origin = tf_sensor_to_footprint.getOrigin();
 
   tf::Quaternion q(0, 0, 0, 1);
@@ -804,6 +800,8 @@ void Downsampler::setGroundNormal()
   transform_broadcaster_.sendTransform(
       tf::StampedTransform(transform_test, ros::Time::now(), "sensor_3d_short_range_depth_optical_frame",
                            "ground_normal"));
+
+//  ground_normal = tf::quatRotate(adjustment, ground_normal);
 
   ground_plane_coeff_.push_back(ground_normal.getX());
   ground_plane_coeff_.push_back(ground_normal.getY());
