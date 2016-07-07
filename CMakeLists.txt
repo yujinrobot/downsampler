@@ -1,20 +1,31 @@
 cmake_minimum_required(VERSION 2.8.3)
+set(CMAKE_CXX_FLAGS "-std=c++11 ${CMAKE_CXX_FLAGS}")
+
 project(downsampler)
 
 find_package(catkin REQUIRED COMPONENTS
+  dynamic_reconfigure
   nodelet
   pcl_conversions
   pcl_ros
   roscpp
   sensor_msgs
+  ecl_geometry
+)
+
+generate_dynamic_reconfigure_options(
+    cfg/Downsampler.cfg
+    cfg/DownsamplerRamp.cfg
 )
 
 catkin_package(CATKIN_DEPENDS
+  dynamic_reconfigure
   nodelet
   pcl_conversions
   pcl_ros
   roscpp
   sensor_msgs
+  ecl_geometry
 )
 
 include_directories( include
