@@ -40,6 +40,8 @@ add_library(${PROJECT_NAME}
    src/downsampler.cpp
 )
 
+add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}_gencfg)
+
 target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES})
 
 install(DIRECTORY cfg DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
