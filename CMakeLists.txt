@@ -18,14 +18,17 @@ generate_dynamic_reconfigure_options(
     cfg/DownsamplerRamp.cfg
 )
 
-catkin_package(CATKIN_DEPENDS
-  dynamic_reconfigure
-  nodelet
-  pcl_conversions
-  pcl_ros
-  roscpp
-  sensor_msgs
-  ecl_geometry
+catkin_package(
+  INCLUDE_DIRS include
+  LIBRARIES ${PROJECT_NAME}
+  CATKIN_DEPENDS
+    dynamic_reconfigure
+    nodelet
+    pcl_conversions
+    pcl_ros
+    roscpp
+    sensor_msgs
+    ecl_geometry
 )
 
 include_directories( include
