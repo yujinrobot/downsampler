@@ -13,6 +13,7 @@
     <arg name="rate"                                default="30"/>
 
     <arg name="sensor_frame"                        default="camera_depth_optical_frame"/>
+    <arg name="sensor_frame_overwrite"              default=""/>
     <arg name="cut_off_distance"                    default="1.2"/>
 
     <node pkg="nodelet" type="nodelet" name="$(arg name)" args="load downsampler/downsampler $(arg manager)">
@@ -27,6 +28,7 @@
         <param name="rate"                             type="double"         value="$(arg rate)"/>
 
         <param name="sensor_frame"                     type="string"         value="$(arg sensor_frame)"/>
+        <param name="sensor_frame_overwrite"           type="string"         value="$(arg sensor_frame_overwrite)"/>
         <param name="cut_off_distance"                 type="double"         value="$(arg cut_off_distance)"/>
     </node>
 </launch>

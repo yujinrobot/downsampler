@@ -64,6 +64,7 @@ void Downsampler::onInit()
   private_nh.param("filter_radius", filter_radius_, filter_radius_);
   private_nh.param("min_points_threshold", min_points_threshold_, min_points_threshold_);
   private_nh.param("sensor_frame", sensor_frame_, std::string("camera_depth_optical_frame"));
+  private_nh.param("sensor_frame_overwrite", sensor_frame_overwrite_, std::string(""));
 
   double rate;
   private_nh.param("rate", rate, 30.0);
@@ -173,6 +174,11 @@ void Downsampler::downsample_cloud_cb(const sensor_msgs::PointCloud2ConstPtr& cl
 
   sensor_msgs::PointCloud2Ptr result_msg(new sensor_msgs::PointCloud2);
   pcl::toROSMsg(*result, *result_msg);
+
+  if (sensor_frame_overwrite_ != "")
+  {
+    result_msg->header.frame_id = sensor_frame_overwrite_;
+  }
 
   pub_downsampled_.publish(result_msg);
 }

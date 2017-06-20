@@ -13,6 +13,7 @@
 
     <arg name="remove_ramp"                         default="true"/>
     <arg name="sensor_frame"                        default="sensor_3d_short_range_depth_optical_frame"/>
+    <arg name="sensor_frame_overwrite"              default=""/>
 
   <node pkg="nodelet" type="nodelet" name="$(arg manager)" args="manager" launch-prefix="valgrind --tool=callgrind"/>
 
@@ -29,5 +30,6 @@
 
       <param name="remove_ramp"                      type="bool"           value="$(arg remove_ramp)"/>
       <param name="sensor_frame"                     type="string"         value="$(arg sensor_frame)"/>
+      <param name="sensor_frame_overwrite"           type="string"         value="$(arg sensor_frame_overwrite)"/>
   </node>
 </launch>

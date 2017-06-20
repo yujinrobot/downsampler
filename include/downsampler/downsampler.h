@@ -74,6 +74,7 @@ protected:
 
   std::atomic<bool> remove_ramp_;
   std::string sensor_frame_;
+  std::string sensor_frame_overwrite_;
   std::mutex param_mutex_;
   double cut_off_distance_;
 
